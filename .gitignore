@@ -61,6 +61,12 @@ desktop.ini
 # Jupyter
 .ipynb_checkpoints
 
+# PyInstaller build artefacts
+build/
+dist/
+*.spec.bak
+!gis_road_master.spec
+
 # pytest / coverage
 .pytest_cache/
 .coverage
