@@ -107,9 +107,19 @@ def process_single(geom, prune: float, straight: float, smooth: int):
     Extract the centerline of one road polygon.
 
     Returns a LineString / MultiLineString, or None on failure.
+
+    Pre-simplifies the polygon before centerlining: a jagged boundary (many
+    tiny vertices from digitising noise) causes the skeleton to sprout micro-
+    loops and zigzag artifacts.  Simplifying to ~10 % of the estimated road
+    width cleans those up without changing the road shape meaningfully.
     """
     try:
-        line = pygeoops.centerline(geom, densify_distance=-1, min_branch_length=prune)
+        m = estimate_polygon_metrics(geom)
+        pre_simplify_tol = max(1e-10, m["width"] * 0.10)
+        clean = geom.simplify(pre_simplify_tol, preserve_topology=True)
+        if clean.is_empty:
+            clean = geom
+        line = pygeoops.centerline(clean, densify_distance=-1, min_branch_length=prune)
     except Exception:
         return None
 
@@ -207,6 +217,63 @@ def process_segments(
 # ─────────────────────────────────────────────────────────────────────────────
 # CONNECTIVITY / EXPORT
 # ─────────────────────────────────────────────────────────────────────────────
+
+def prune_dead_ends(
+    lines: list[LineString],
+    threshold: float,
+    coord_decimals: int = 5,
+) -> list[LineString]:
+    """
+    Iteratively remove dangling branch segments shorter than *threshold*.
+
+    A dead end is a segment whose start OR end point connects to nothing else
+    (degree-1 node in the line network).  Removing it may expose new dead ends,
+    so the loop runs until no more removals occur.
+
+    This eliminates the "comb spike" artifacts that a simple length filter
+    misses: each spike passes the length test individually, but as a dangling
+    branch it is clearly an extraction artifact.
+
+    coord_decimals: rounding precision for endpoint matching.
+        5 decimals ≈ 1 m for geographic (degree) CRS.
+    """
+    if threshold <= 0 or not lines:
+        return lines
+
+    def rp(p):
+        return (round(p[0], coord_decimals), round(p[1], coord_decimals))
+
+    current = list(lines)
+    while True:
+        # Count how many line-ends share each rounded coordinate
+        deg: dict = {}
+        for line in current:
+            c = list(line.coords)
+            if len(c) < 2:
+                continue
+            for pt in (rp(c[0]), rp(c[-1])):
+                deg[pt] = deg.get(pt, 0) + 1
+
+        next_lines = []
+        pruned_any = False
+        for line in current:
+            c = list(line.coords)
+            if len(c) < 2:
+                next_lines.append(line)
+                continue
+            s, e = rp(c[0]), rp(c[-1])
+            # Drop if short AND at least one end is dangling
+            if line.length < threshold and (deg.get(s, 1) == 1 or deg.get(e, 1) == 1):
+                pruned_any = True
+            else:
+                next_lines.append(line)
+
+        current = next_lines
+        if not pruned_any:
+            break
+
+    return current
+
 
 def snap_endpoints(lines: list[LineString], tolerance: float | None = None) -> list[LineString]:
     """Snap nearby line endpoints together for better network connectivity."""

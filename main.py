@@ -43,6 +43,7 @@ from algorithms import (
     export_geojson,
     lines_to_gdf,
     process_segments,
+    prune_dead_ends,
     snap_endpoints,
 )
 from ui_components import DragSelectChecklist, SliderRow, StatusBar, make_button
@@ -168,8 +169,11 @@ class GISRoadMaster:
         self._s_smooth   = SliderRow(param_frame, "Smoothing",
                                      0,      5,      2,       1,       "{:.0f}",
                                      on_change=self._on_smooth_change)
-        self._s_minlen   = SliderRow(param_frame, "Min Line Length (filter spikes)",
+        self._s_minlen   = SliderRow(param_frame, "Min Line Length",
                                      0.0,    0.01,   0.0,    0.0001,  "{:.4f}",
+                                     on_change=self._on_minlen_change)
+        self._s_deadend  = SliderRow(param_frame, "Dead-end Branch Pruning",
+                                     0.0,    0.02,   0.0,    0.0002,  "{:.4f}",
                                      on_change=self._on_minlen_change)
         self._toggle_auto()
 
@@ -257,11 +261,18 @@ class GISRoadMaster:
         self._redraw_map()
 
     def _apply_minlen(self, lines: list) -> list:
-        """Return only lines whose length >= the Min Line Length slider."""
-        threshold = self._s_minlen.get()
-        if threshold <= 0:
-            return lines
-        return [l for l in lines if l.length >= threshold]
+        """Apply min-length filter then iterative dead-end branch pruning."""
+        # 1. Drop all lines shorter than the absolute minimum
+        minlen = self._s_minlen.get()
+        if minlen > 0:
+            lines = [l for l in lines if l.length >= minlen]
+
+        # 2. Iteratively prune dangling branches (combs/spikes at junctions)
+        deadend = self._s_deadend.get()
+        if deadend > 0:
+            lines = prune_dead_ends(lines, deadend)
+
+        return lines
 
     # ═════════════════════════════════════════════════════════════════════════
     # DATA HELPERS
