@@ -135,73 +135,40 @@ class GISRoadMaster:
 
     def _build_left(self) -> None:
         lf = self._left
-        pad = {"padx": 8, "pady": 3}
+        pad = {"padx": 6, "pady": 3}
 
-        # Title
-        ttk.Label(lf, text="GIS Road Master", font=FONT_HEADER).pack(**pad)
+        # Title (always visible above the notebook)
+        ttk.Label(lf, text="GIS Road Master", font=FONT_HEADER).pack(
+            padx=8, pady=(6, 2))
         ttk.Separator(lf).pack(fill="x", padx=8, pady=2)
 
-        # File section (top, fixed)
-        file_frame = ttk.LabelFrame(lf, text=" Data Source ", padding="6")
+        # Notebook fills the rest of the sidebar
+        nb = ttk.Notebook(lf)
+        nb.pack(fill="both", expand=True, padx=2, pady=2)
+
+        tab_actions = ttk.Frame(nb)
+        tab_filters = ttk.Frame(nb)
+        nb.add(tab_actions, text="  Actions  ")
+        nb.add(tab_filters, text="  Filters  ")
+
+        self._build_actions_tab(tab_actions, pad)
+        self._build_filters_tab(tab_filters, pad)
+
+    def _build_actions_tab(self, parent, pad) -> None:
+        """File loader + Processing Parameters + Workflow action buttons."""
+
+        # ── File section ─────────────────────────────────────────────────
+        file_frame = ttk.LabelFrame(parent, text=" Data Source ", padding="6")
         file_frame.pack(fill="x", **pad)
         make_button(file_frame, "Load GeoJSON", self._load_file, "info").pack(fill="x")
         self._file_lbl = ttk.Label(file_frame, text="No file loaded",
                                    wraplength=295, font=("Segoe UI", 8))
         self._file_lbl.pack(anchor="w", pady=(3, 0))
 
-        # Actions section (bottom, fixed) – pack BEFORE the expanding filters
-        act_frame = ttk.LabelFrame(lf, text=" Actions ", padding="6")
-        act_frame.pack(fill="x", side="bottom", **pad)
+        # ── Processing Parameters ─────────────────────────────────────────
+        param_frame = ttk.LabelFrame(parent, text=" Processing Parameters ", padding="6")
+        param_frame.pack(fill="x", **pad)
 
-        # ── Step 1: Prepare ──────────────────────────────────────────────
-        ttk.Label(act_frame, text="① PREPARE",
-                  font=("Segoe UI", 7, "bold"),
-                  foreground="#888888").pack(anchor="w", pady=(0, 1))
-        make_button(act_frame, "◈  SHAPE BUILDER",
-                    self._open_shape_builder, "info").pack(fill="x", pady=1)
-        self._shape_lbl = ttk.Label(act_frame, text="  no shape override",
-                                    font=("Segoe UI", 7), foreground="#666666")
-        self._shape_lbl.pack(anchor="w")
-        make_button(act_frame, "〰  DRAW ROUTING HINTS",
-                    self._open_hint_tool, "info").pack(fill="x", pady=1)
-        self._hint_lbl = ttk.Label(act_frame, text="  no hints",
-                                   font=("Segoe UI", 7), foreground="#666666")
-        self._hint_lbl.pack(anchor="w")
-        ttk.Separator(act_frame).pack(fill="x", pady=3)
-        # ── Step 2: Process ──────────────────────────────────────────────
-        ttk.Label(act_frame, text="② PROCESS",
-                  font=("Segoe UI", 7, "bold"),
-                  foreground="#888888").pack(anchor="w", pady=(0, 1))
-        make_button(act_frame, "PROCESS GLOBAL MAP",
-                    self._process_global, "primary").pack(fill="x", pady=2)
-        ttk.Separator(act_frame).pack(fill="x", pady=3)
-        # ── Step 3: Refine ───────────────────────────────────────────────
-        ttk.Label(act_frame, text="③ REFINE",
-                  font=("Segoe UI", 7, "bold"),
-                  foreground="#888888").pack(anchor="w", pady=(0, 1))
-        make_button(act_frame, "DRAW EDIT BOX",
-                    self._start_box_draw, "warning").pack(fill="x", pady=2)
-        make_button(act_frame, "OPEN PRECISION EDITOR",
-                    self._open_precision_editor, "success").pack(fill="x", pady=2)
-        make_button(act_frame, "APPLY EDITS TO GLOBAL MAP",
-                    self._apply_precision, "success").pack(fill="x", pady=2)
-        ttk.Separator(act_frame).pack(fill="x", pady=3)
-        # ── Step 4: Draw ─────────────────────────────────────────────────
-        ttk.Label(act_frame, text="④ DRAW",
-                  font=("Segoe UI", 7, "bold"),
-                  foreground="#888888").pack(anchor="w", pady=(0, 1))
-        make_button(act_frame, "✏  PENCIL TOOL — Draw Lines",
-                    self._open_pencil_tool, "warning").pack(fill="x", pady=2)
-        ttk.Separator(act_frame).pack(fill="x", pady=3)
-        # ── Step 5: Export ───────────────────────────────────────────────
-        make_button(act_frame, "EXPORT FINAL GeoJSON",
-                    self._export, "secondary").pack(fill="x", pady=2)
-
-        # Parameters section (bottom, fixed) – also before filters
-        param_frame = ttk.LabelFrame(lf, text=" Processing Parameters ", padding="6")
-        param_frame.pack(fill="x", side="bottom", **pad)
-
-        # Auto-tune toggle – OFF by default so manual sliders are active
         self._auto_var = tk.BooleanVar(value=False)
         cb_kw: dict = {
             "text": "Auto-Tune per segment",
@@ -212,7 +179,6 @@ class GISRoadMaster:
             cb_kw["bootstyle"] = "success-round-toggle"
         ttk.Checkbutton(param_frame, **cb_kw).pack(anchor="w", pady=(0, 4))
 
-        # Algorithm selector (shown only in manual mode)
         algo_row = ttk.Frame(param_frame)
         algo_row.pack(fill="x", pady=(0, 4))
         ttk.Label(algo_row, text="Algorithm:", font=("Segoe UI", 8)).pack(
@@ -221,7 +187,6 @@ class GISRoadMaster:
             algo_row, textvariable=self._manual_algo,
             values=METHOD_LABELS, state="readonly", width=18)
         self._algo_combo.pack(side="left")
-        self._algo_row = algo_row
 
         self._s_prune    = SliderRow(param_frame, "Pruning",
                                      0.0,    1.0,    0.10,   0.005,   "{:.3f}")
@@ -238,13 +203,71 @@ class GISRoadMaster:
                                      on_change=self._on_minlen_change)
         self._toggle_auto()
 
-        # Filters section (expands to fill remaining space)
-        filt_frame = ttk.LabelFrame(lf, text=" Filters ", padding="6")
-        filt_frame.pack(fill="both", expand=True, **pad)
-        list_box = ttk.Frame(filt_frame)
-        list_box.pack(fill="both", expand=True)
-        self.plan_list = DragSelectChecklist(list_box, "Plans")
-        self.type_list = DragSelectChecklist(list_box, "Road Types")
+        # ── Workflow action buttons ───────────────────────────────────────
+        act_frame = ttk.LabelFrame(parent, text=" Workflow ", padding="6")
+        act_frame.pack(fill="x", **pad)
+
+        def _step(text):
+            ttk.Label(act_frame, text=text,
+                      font=("Segoe UI", 7, "bold"),
+                      foreground="#888888").pack(anchor="w", pady=(4, 1))
+
+        _step("① PREPARE")
+        make_button(act_frame, "◈  SHAPE BUILDER",
+                    self._open_shape_builder, "info").pack(fill="x", pady=1)
+        self._shape_lbl = ttk.Label(act_frame, text="  no shape override",
+                                    font=("Segoe UI", 7), foreground="#666666")
+        self._shape_lbl.pack(anchor="w")
+        make_button(act_frame, "〰  DRAW ROUTING HINTS",
+                    self._open_hint_tool, "info").pack(fill="x", pady=1)
+        self._hint_lbl = ttk.Label(act_frame, text="  no hints",
+                                   font=("Segoe UI", 7), foreground="#666666")
+        self._hint_lbl.pack(anchor="w")
+
+        ttk.Separator(act_frame).pack(fill="x", pady=4)
+        _step("② PROCESS")
+        make_button(act_frame, "PROCESS GLOBAL MAP",
+                    self._process_global, "primary").pack(fill="x", pady=2)
+
+        ttk.Separator(act_frame).pack(fill="x", pady=4)
+        _step("③ REFINE")
+        make_button(act_frame, "DRAW EDIT BOX",
+                    self._start_box_draw, "warning").pack(fill="x", pady=2)
+        make_button(act_frame, "OPEN PRECISION EDITOR",
+                    self._open_precision_editor, "success").pack(fill="x", pady=2)
+        make_button(act_frame, "APPLY EDITS TO GLOBAL MAP",
+                    self._apply_precision, "success").pack(fill="x", pady=2)
+
+        ttk.Separator(act_frame).pack(fill="x", pady=4)
+        _step("④ DRAW")
+        make_button(act_frame, "✏  PENCIL TOOL — Draw Lines",
+                    self._open_pencil_tool, "warning").pack(fill="x", pady=2)
+
+        ttk.Separator(act_frame).pack(fill="x", pady=4)
+        make_button(act_frame, "EXPORT FINAL GeoJSON",
+                    self._export, "secondary").pack(fill="x", pady=2)
+
+    def _build_filters_tab(self, parent, pad) -> None:
+        """Plan and Road-Type filter checklists with Select All / None."""
+
+        ttk.Label(
+            parent,
+            text="Select plans and road types to include.\n"
+                 "Drag to toggle multiple items at once.",
+            font=("Segoe UI", 8),
+            foreground="#888888",
+            wraplength=300,
+        ).pack(anchor="w", padx=8, pady=(6, 4))
+
+        # Each DragSelectChecklist manages its own LabelFrame + scrollable list.
+        # Wrap in plain Frames so they stack vertically and each gets half height.
+        plan_frame = ttk.Frame(parent)
+        plan_frame.pack(fill="both", expand=True, padx=4, pady=(0, 2))
+        self.plan_list = DragSelectChecklist(plan_frame, "Plans")
+
+        type_frame = ttk.Frame(parent)
+        type_frame.pack(fill="both", expand=True, padx=4, pady=(2, 4))
+        self.type_list = DragSelectChecklist(type_frame, "Road Types")
 
     # ── right canvas ──────────────────────────────────────────────────────────
 
