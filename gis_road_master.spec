@@ -28,7 +28,7 @@ for pkg in [
     hiddenimports += h
 
 # ── Numerics ────────────────────────────────────────────────────────────────
-for pkg in ["numpy", "pandas"]:
+for pkg in ["numpy", "pandas", "PIL"]:
     d, b, h = collect_all(pkg)
     datas         += d
     binaries      += b
@@ -74,7 +74,7 @@ a = Analysis(
     excludes=[
         # Trim unused heavy packages to keep the build smaller
         "IPython", "jupyter", "notebook", "scipy", "sklearn",
-        "PIL", "cv2", "PyQt5", "PyQt6", "wx",
+        "cv2", "PyQt5", "PyQt6", "wx",
     ],
     noarchive=False,
 )
