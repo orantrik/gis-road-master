@@ -277,62 +277,88 @@ def _fbx_takes() -> str:
 
 _UNREAL_SCRIPT_TEMPLATE = '''\
 """
-unreal_import_splines.py  –  GIS Road Master companion script
+unreal_import_splines.py  -  GIS Road Master companion script
 =====================================================================
-Run this inside the Unreal Editor:
-    Tools → Execute Python Script → select this file
+HOW TO RUN (two options):
+
+  Option A - Execute Python Script
+    Tools -> Execute Python Script -> select this file
+    (requires Python Editor Script Plugin enabled + editor restart)
+
+  Option B - Python Console (always works)
+    Window -> Output Log
+    Change the left dropdown from "Cmd" to "Python"
+    Paste the contents of this file and press Enter
+
+CONFIGURATION - edit the two lines marked CONFIGURE below.
 
 What it does
 ------------
-Reads the companion JSON file "{json_name}" (must be in the same
-folder as this script), then creates one SplineActor per centerline
-in the currently open level.  Each actor is named "Road_N" and its
-spline passes through the original GIS control points.
+Reads the companion JSON file (exported alongside the FBX), then
+creates one Actor with a SplineComponent per centerline in the
+currently open level, named Road_0000, Road_0001, etc.
 
 Requirements
 ------------
-• Unreal Engine 5.x with the Python Editor Script Plugin enabled
-  (Edit → Plugins → search "Python Editor Script Plugin" → Enable)
-• The .json companion file exported alongside the FBX
+  Unreal Engine 5.x
+  Python Editor Script Plugin enabled
+  Editor Scripting Utilities Plugin enabled
 """
 
-import json
-import os
-import unreal
+import json, os, unreal
 
-JSON_FILE = os.path.join(os.path.dirname(__file__), "{{json_name}}")
+# ── CONFIGURE ─────────────────────────────────────────────────────
+JSON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "{{json_name}}")
+SCALE     = 100000.0   # multiply GIS coordinates -> Unreal cm
+#   1 geographic degree ~ 111 km ~ 11,100,000 cm, but tune to your data.
+#   If roads appear tiny: increase SCALE.  If they are huge: decrease it.
+# ──────────────────────────────────────────────────────────────────
 
-# ── Load control points ────────────────────────────────────────────
-with open(JSON_FILE, encoding="utf-8") as f:
-    roads = json.load(f)   # list of lists: [[x,y,z, x,y,z, ...], ...]
+with open(JSON_FILE, encoding="utf-8") as _f:
+    roads = json.load(_f)
 
-editor_subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
-level_editor     = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
-
-created = 0
-for idx, flat_pts in enumerate(roads):
-    # Rebuild list of (x, y, z) tuples from flat array
+def _spawn_road(idx, flat_pts):
     pts = [(flat_pts[i], flat_pts[i+1], flat_pts[i+2])
            for i in range(0, len(flat_pts), 3)]
     if len(pts) < 2:
-        continue
+        return False
 
-    # Spawn a SplineActor
-    location = unreal.Vector(pts[0][0], pts[0][1], pts[0][2])
-    actor = editor_subsystem.spawn_actor_from_class(
-        unreal.SplineActor, location)
-    actor.set_actor_label(f"Road_{idx}")
+    ref_x, ref_y = pts[0][0], pts[0][1]
 
-    spline = actor.get_component_by_class(unreal.SplineComponent)
-    spline.clear_spline_points()
+    # Spawn a plain Actor then register a SplineComponent onto it.
+    # EditorLevelLibrary works in UE5 with Editor Scripting Utilities.
+    actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
+        unreal.Actor,
+        unreal.Vector(0.0, 0.0, 0.0),
+        unreal.Rotator(0.0, 0.0, 0.0),
+    )
+    actor.set_actor_label("Road_{:04d}".format(idx))
 
+    spline = actor.add_component_by_class(
+        unreal.SplineComponent, False, unreal.Transform(), True)
+
+    if spline is None:
+        unreal.log_warning("Road_{:04d}: SplineComponent could not be added".format(idx))
+        actor.destroy_actor()
+        return False
+
+    spline.clear_spline_points(True)
     for x, y, z in pts:
-        spline.add_spline_world_point(unreal.Vector(x, y, z))
+        spline.add_spline_world_point(
+            unreal.Vector((x - ref_x) * SCALE,
+                          (y - ref_y) * SCALE,
+                          z * SCALE))
+    spline.update_spline()
+    return True
 
-    spline.set_closed_loop(False, update_spline=True)
-    created += 1
+created = 0
+with unreal.ScopedEditorTransaction("GIS Road Master: Import Splines"):
+    for i, flat in enumerate(roads):
+        if _spawn_road(i, flat):
+            created += 1
 
-unreal.log("GIS Road Master: created " + str(created) + " SplineActors from " + JSON_FILE)
+unreal.log("GIS Road Master: created {} SplineActors (scale={})".format(created, SCALE))
+unreal.log("Tip: select all Road_* actors and adjust scale in Details if roads look too big/small.")
 '''
 
 
