@@ -48,6 +48,7 @@ from algorithms import (
     prune_dead_ends,
     snap_endpoints,
 )
+from fbx_export import export_fbx
 from ui_components import DragSelectChecklist, SliderRow, StatusBar, make_button
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,6 +285,8 @@ class GISRoadMaster:
         ttk.Separator(act_frame).pack(fill="x", pady=4)
         make_button(act_frame, "EXPORT FINAL GeoJSON",
                     self._export, "secondary").pack(fill="x", pady=2)
+        make_button(act_frame, "EXPORT FBX BEZIER CURVES",
+                    self._export_fbx, "secondary").pack(fill="x", pady=2)
 
         # After all widgets exist, bind wheel scroll on every descendant
         self._bind_scroll_to_canvas(_inner, _canvas)
@@ -1447,6 +1450,37 @@ class GISRoadMaster:
             self._set_busy(False, "Export complete")
             messagebox.showinfo("Exported",
                                 f"Saved {n} features to:\n{path}")
+
+        self._launch_thread(_work, _done)
+
+    def _export_fbx(self) -> None:
+        """Export centerlines as FBX Bezier curves (cubic C1 NURBS)."""
+        if not self.master_lines:
+            messagebox.showinfo("Info",
+                                "Nothing to export — process the map first.")
+            return
+
+        path = filedialog.asksaveasfilename(
+            defaultextension=".fbx",
+            filetypes=[("FBX", "*.fbx"), ("All files", "*.*")],
+            initialfile="road_centerlines.fbx")
+        if not path:
+            return
+
+        self._set_busy(True, "Exporting FBX Bezier curves…")
+        lines = list(self.master_lines)
+
+        def _work():
+            return export_fbx(lines, path)
+
+        def _done(n: int) -> None:
+            self._set_busy(False, "FBX export complete")
+            messagebox.showinfo(
+                "FBX Exported",
+                f"Saved {n} Bezier curve{'s' if n != 1 else ''} to:\n{path}\n\n"
+                "Each centerline is a cubic C1-continuous NURBS curve\n"
+                "(degree 3, Catmull-Rom → Bezier conversion).\n"
+                "Import into Blender, Maya, 3ds Max, etc.")
 
         self._launch_thread(_work, _done)
 
