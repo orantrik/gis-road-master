@@ -86,6 +86,10 @@ class GISRoadMaster:
         self.eraser_history: list[tuple[int, LineString]] = []
         self.selected_box = None                   # shapely box geom
         self._proposals: list[Proposal] = []       # network completion proposals
+        # Completion defaults (persisted between window opens)
+        self._comp_gap   = 0.005
+        self._comp_angle = 50.0
+        self._comp_conf  = 0.15
 
         # ── async state ──────────────────────────────────────────────────────
         self._queue: queue.Queue = queue.Queue()
@@ -153,16 +157,6 @@ class GISRoadMaster:
         ttk.Separator(act_frame).pack(fill="x", pady=3)
         make_button(act_frame, "EXPORT FINAL GeoJSON",
                     self._export, "secondary").pack(fill="x", pady=2)
-
-        # ── Completion Parameters ──────────────────────────────────────────
-        comp_frame = ttk.LabelFrame(lf, text=" Completion Parameters ", padding="6")
-        comp_frame.pack(fill="x", side="bottom", **pad)
-        self._s_gap   = SliderRow(comp_frame, "Max Gap Distance",
-                                  0.0001, 0.02, 0.005, 0.0001, "{:.4f}")
-        self._s_angle = SliderRow(comp_frame, "Max Angle (°)",
-                                  10, 90, 50, 5, "{:.0f}")
-        self._s_conf  = SliderRow(comp_frame, "Min Confidence",
-                                  0.0, 1.0, 0.15, 0.05, "{:.2f}")
 
         # Parameters section (bottom, fixed) – also before filters
         param_frame = ttk.LabelFrame(lf, text=" Processing Parameters ", padding="6")
@@ -608,24 +602,38 @@ class GISRoadMaster:
     # NETWORK COMPLETION  (predict & complete gaps)
     # ═════════════════════════════════════════════════════════════════════════
 
-    def _run_completion(self) -> None:
-        """Run the CompletionEngine and open the interactive proposal window."""
+    def _run_completion(
+        self,
+        max_gap: float | None = None,
+        max_angle_deg: float | None = None,
+        min_confidence: float | None = None,
+        rerun_cb=None,
+    ) -> None:
+        """
+        Run the CompletionEngine and open (or refresh) the proposal window.
+
+        Parameters default to the last-used values so settings persist between
+        runs.  `rerun_cb` is an optional callable to refresh an already-open
+        window instead of opening a new one.
+        """
         if not self.master_lines:
             messagebox.showinfo("Info", "Process the global map first.")
             return
 
-        max_gap = self._s_gap.get()
-        max_ang = self._s_angle.get()
-        min_con = self._s_conf.get()
+        # Persist settings
+        if max_gap        is not None: self._comp_gap   = max_gap
+        if max_angle_deg  is not None: self._comp_angle = max_angle_deg
+        if min_confidence is not None: self._comp_conf  = min_confidence
 
+        gap, ang, con = self._comp_gap, self._comp_angle, self._comp_conf
         self._set_busy(True, "Finding dangling endpoints and scoring pairs…")
 
         def _work():
             engine = CompletionEngine(
                 self.master_lines,
-                max_gap=max_gap,
-                max_angle_deg=max_ang,
-                min_confidence=min_con,
+                max_gap=gap,
+                max_angle_deg=ang,
+                min_confidence=con,
             )
             return engine.run()
 
@@ -635,13 +643,16 @@ class GISRoadMaster:
             self._set_busy(False,
                            f"Found {n} proposal{'s' if n != 1 else ''} — "
                            "review in the completion window")
-            if not proposals:
+            if rerun_cb:
+                # Refresh an already-open window
+                rerun_cb(proposals)
+            elif not proposals:
                 messagebox.showinfo(
                     "No proposals",
                     "No gap connections found with the current parameters.\n\n"
                     "Try increasing Max Gap Distance or Max Angle.")
-                return
-            self._show_completion_window()
+            else:
+                self._show_completion_window()
 
         self._launch_thread(_work, _done)
 
@@ -659,15 +670,53 @@ class GISRoadMaster:
           R                  → reject all
           Enter              → apply accepted and close
         """
-        proposals = self._proposals
+        # Use a mutable list so _do_rerun / _refresh can replace contents
+        # while _redraw and _apply_and_close still reference the same object.
+        proposals: list[Proposal] = list(self._proposals)
         if not proposals:
             return
 
         top = tk.Toplevel(self.root)
         top.title(f"Network Completion  —  {len(proposals)} proposals")
-        top.geometry("980x760")
+        top.geometry("980x820")
 
-        # ── info bar ──────────────────────────────────────────────────────
+        # ── settings bar (replaces sidebar sliders) ───────────────────────
+        sf = ttk.LabelFrame(top, text=" Completion Parameters ", padding="6")
+        sf.pack(fill="x", padx=6, pady=(6, 0))
+        sf_inner = ttk.Frame(sf)
+        sf_inner.pack(fill="x")
+
+        # Gap slider
+        gap_col = ttk.Frame(sf_inner); gap_col.pack(side="left", expand=True, fill="x", padx=4)
+        ttk.Label(gap_col, text="Max Gap Distance", font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        gap_val_lbl = ttk.Label(gap_col, text=f"{self._comp_gap:.4f}")
+        gap_val_lbl.pack(anchor="e")
+        gap_scale = tk.Scale(gap_col, from_=0.0001, to=0.02, resolution=0.0001,
+                             orient="horizontal", showvalue=False,
+                             command=lambda v: gap_val_lbl.config(text=f"{float(v):.4f}"))
+        gap_scale.set(self._comp_gap); gap_scale.pack(fill="x")
+
+        # Angle slider
+        ang_col = ttk.Frame(sf_inner); ang_col.pack(side="left", expand=True, fill="x", padx=4)
+        ttk.Label(ang_col, text="Max Angle (°)", font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        ang_val_lbl = ttk.Label(ang_col, text=f"{self._comp_angle:.0f}")
+        ang_val_lbl.pack(anchor="e")
+        ang_scale = tk.Scale(ang_col, from_=10, to=90, resolution=5,
+                             orient="horizontal", showvalue=False,
+                             command=lambda v: ang_val_lbl.config(text=f"{float(v):.0f}"))
+        ang_scale.set(self._comp_angle); ang_scale.pack(fill="x")
+
+        # Confidence slider
+        con_col = ttk.Frame(sf_inner); con_col.pack(side="left", expand=True, fill="x", padx=4)
+        ttk.Label(con_col, text="Min Confidence", font=("Segoe UI", 8, "bold")).pack(anchor="w")
+        con_val_lbl = ttk.Label(con_col, text=f"{self._comp_conf:.2f}")
+        con_val_lbl.pack(anchor="e")
+        con_scale = tk.Scale(con_col, from_=0.0, to=1.0, resolution=0.05,
+                             orient="horizontal", showvalue=False,
+                             command=lambda v: con_val_lbl.config(text=f"{float(v):.2f}"))
+        con_scale.set(self._comp_conf); con_scale.pack(fill="x")
+
+        # ── info / hint bar ───────────────────────────────────────────────
         info = ttk.Frame(top, padding="4")
         info.pack(fill="x")
         ttk.Label(
@@ -701,6 +750,20 @@ class GISRoadMaster:
                     lambda: _toggle_all(True),  "success").pack(side="left",  padx=4)
         make_button(btn_bar, "Reject All",
                     lambda: _toggle_all(False), "danger").pack(side="left",   padx=4)
+        def _do_rerun():
+            def _refresh(new_props):
+                proposals.clear()
+                proposals.extend(new_props)
+                _redraw()
+            self._run_completion(
+                max_gap=float(gap_scale.get()),
+                max_angle_deg=float(ang_scale.get()),
+                min_confidence=float(con_scale.get()),
+                rerun_cb=_refresh,
+            )
+
+        make_button(btn_bar, "Re-run with Settings",
+                    _do_rerun, "warning").pack(side="left", padx=4)
         make_button(btn_bar, "Apply Accepted & Close",
                     lambda: (_apply_and_close()), "primary").pack(side="right", padx=4)
 
