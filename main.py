@@ -87,9 +87,9 @@ class GISRoadMaster:
         self.selected_box = None                   # shapely box geom
         self._proposals: list[Proposal] = []       # network completion proposals
         # Completion defaults (persisted between window opens)
-        self._comp_gap   = 0.005
-        self._comp_angle = 50.0
-        self._comp_conf  = 0.15
+        self._comp_gap   = 0.008   # generous gap for typical road networks
+        self._comp_angle = 70.0   # soft – tangents 70° off-axis still score
+        self._comp_conf  = 0.05   # low floor – let the user see & reject extras
 
         # ── async state ──────────────────────────────────────────────────────
         self._queue: queue.Queue = queue.Queue()
@@ -691,7 +691,7 @@ class GISRoadMaster:
         ttk.Label(gap_col, text="Max Gap Distance", font=("Segoe UI", 8, "bold")).pack(anchor="w")
         gap_val_lbl = ttk.Label(gap_col, text=f"{self._comp_gap:.4f}")
         gap_val_lbl.pack(anchor="e")
-        gap_scale = tk.Scale(gap_col, from_=0.0001, to=0.02, resolution=0.0001,
+        gap_scale = tk.Scale(gap_col, from_=0.0001, to=0.03, resolution=0.0001,
                              orient="horizontal", showvalue=False,
                              command=lambda v: gap_val_lbl.config(text=f"{float(v):.4f}"))
         gap_scale.set(self._comp_gap); gap_scale.pack(fill="x")
@@ -706,12 +706,12 @@ class GISRoadMaster:
                              command=lambda v: ang_val_lbl.config(text=f"{float(v):.0f}"))
         ang_scale.set(self._comp_angle); ang_scale.pack(fill="x")
 
-        # Confidence slider
+        # Confidence slider  (lower range – 0.01 lets users see near-miss proposals)
         con_col = ttk.Frame(sf_inner); con_col.pack(side="left", expand=True, fill="x", padx=4)
         ttk.Label(con_col, text="Min Confidence", font=("Segoe UI", 8, "bold")).pack(anchor="w")
         con_val_lbl = ttk.Label(con_col, text=f"{self._comp_conf:.2f}")
         con_val_lbl.pack(anchor="e")
-        con_scale = tk.Scale(con_col, from_=0.0, to=1.0, resolution=0.05,
+        con_scale = tk.Scale(con_col, from_=0.01, to=1.0, resolution=0.01,
                              orient="horizontal", showvalue=False,
                              command=lambda v: con_val_lbl.config(text=f"{float(v):.2f}"))
         con_scale.set(self._comp_conf); con_scale.pack(fill="x")
@@ -799,8 +799,10 @@ class GISRoadMaster:
             for k, prop in enumerate(proposals):
                 x, y  = prop.line.xy
                 col   = _confidence_colour(prop.score, prop.accepted)
+                is_tj = getattr(prop, "kind", "gap") == "tjunction"
                 lw    = 2.2 if prop.accepted else 1.2
-                ls    = "--" if prop.accepted else ":"
+                # T-junctions: solid line; gaps: dashed
+                ls    = "-" if (prop.accepted and is_tj) else "--" if prop.accepted else ":"
                 alpha = 0.95 if prop.accepted else 0.45
                 (artist,) = ax.plot(
                     x, y,
@@ -821,10 +823,11 @@ class GISRoadMaster:
                 _artists[id(artist)] = k
 
             tc = "#dddddd" if BOOTSTRAP else "black"
+            n_tj = sum(1 for p in proposals if getattr(p, "kind", "gap") == "tjunction")
             ax.set_title(
-                f"Proposals: {len(proposals)} total  ·  {n_acc} accepted  "
-                f"(orange/green = accepted, slate = rejected)",
-                color=tc, fontsize=9,
+                f"{len(proposals)} proposals  ({n_tj} T-junctions)  ·  {n_acc} accepted  "
+                f"·  solid = T-junction  ·  dashed = gap  ·  slate = rejected",
+                color=tc, fontsize=8,
             )
             count_lbl.config(text=f"{n_acc} / {len(proposals)} accepted")
             cv.draw()
