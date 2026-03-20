@@ -168,6 +168,9 @@ class GISRoadMaster:
         self._s_smooth   = SliderRow(param_frame, "Smoothing",
                                      0,      5,      2,       1,       "{:.0f}",
                                      on_change=self._on_smooth_change)
+        self._s_minlen   = SliderRow(param_frame, "Min Line Length (filter spikes)",
+                                     0.0,    0.01,   0.0,    0.0001,  "{:.4f}",
+                                     on_change=self._on_minlen_change)
         self._toggle_auto()
 
         # Filters section (expands to fill remaining space)
@@ -241,8 +244,24 @@ class GISRoadMaster:
         """Live re-smooth without re-running the expensive centerline step."""
         if self._auto_var.get() or not self._raw_lines:
             return
-        self.master_lines = apply_smoothing(self._raw_lines, int(val))
+        smoothed = apply_smoothing(self._raw_lines, int(val))
+        self.master_lines = self._apply_minlen(smoothed)
         self._redraw_map()
+
+    def _on_minlen_change(self, val: float) -> None:
+        """Live length filter — drops spikes below the threshold instantly."""
+        if not self._raw_lines:
+            return
+        smoothed = apply_smoothing(self._raw_lines, int(self._s_smooth.get()))
+        self.master_lines = self._apply_minlen(smoothed)
+        self._redraw_map()
+
+    def _apply_minlen(self, lines: list) -> list:
+        """Return only lines whose length >= the Min Line Length slider."""
+        threshold = self._s_minlen.get()
+        if threshold <= 0:
+            return lines
+        return [l for l in lines if l.length >= threshold]
 
     # ═════════════════════════════════════════════════════════════════════════
     # DATA HELPERS
@@ -290,8 +309,8 @@ class GISRoadMaster:
         self._launch_thread(_work, self._on_global_done)
 
     def _on_global_done(self, lines: list) -> None:
-        self._raw_lines    = [l for l in lines if l is not None and not l.is_empty]
-        self.master_lines  = list(self._raw_lines)
+        self._raw_lines   = [l for l in lines if l is not None and not l.is_empty]
+        self.master_lines = self._apply_minlen(self._raw_lines)
         n = len(self.master_lines)
         self._set_busy(False, f"Done — {n} centerline segment{'s' if n != 1 else ''}")
         if not self.master_lines:
@@ -412,8 +431,8 @@ class GISRoadMaster:
                 manual_smooth=smooth, progress_cb=_cb)
 
         def _done(lines: list) -> None:
-            self.precision_lines = [l for l in lines
-                                    if l is not None and not l.is_empty]
+            raw = [l for l in lines if l is not None and not l.is_empty]
+            self.precision_lines = self._apply_minlen(raw)
             self.eraser_history.clear()
             self._set_busy(False,
                            f"Precision: {len(self.precision_lines)} lines")
