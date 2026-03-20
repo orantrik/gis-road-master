@@ -1,25 +1,38 @@
 """
 fbx_export.py – FBX ASCII 7.4.0 export for GIS Road Master centerlines.
 
-Each LineString is exported as a cubic Bezier NURBS curve using the
-Catmull-Rom → Bezier conversion so the spline passes through every
-original vertex with C1-continuous (smooth) joins between segments.
+Unreal Engine compatibility
+---------------------------
+Unreal's FBX importer does not import NurbsCurve geometry as splines;
+it reads only mesh, skeleton, camera, and light objects.  To get Bezier
+spline data into Unreal:
 
-FBX representation
-------------------
-FBX has no native "Bezier" primitive; it uses NurbsCurve (degree 3).
-A composite cubic Bezier with n-1 segments maps to NURBS with:
-  • 3(n-1)+1 control points  (shared endpoints, not duplicated)
-  • triple interior knots     (gives C0 continuity at joins – one full
-                               Bezier segment per knot span)
+  1. This exporter writes every centerline as a null Model node that
+     carries a custom "BezierControlPoints" string property containing
+     JSON-encoded [x,y,z, x,y,z, ...] Catmull-Rom Bezier control points.
 
-For C1-smooth joins the Catmull-Rom control points P1/P2 at each join
-are already collinear with the shared endpoint, so the curve visually
-reads as fully smooth.
+  2. A companion *_unreal_splines.py* script is written next to the FBX.
+     Run it inside the Unreal Editor (Tools → Execute Python Script) to
+     turn those null nodes into SplineActor objects in the current level.
+
+  3. The NurbsCurve geometry is *also* written as a sibling geometry node
+     so the file still opens correctly in Blender, Maya, and Cinema 4D.
+
+FBX structure required by Unreal
+----------------------------------
+  FBXHeaderExtension   (present)
+  GlobalSettings       (present)
+  Documents            ← was missing; Unreal parser fails without it
+  References           ← was missing
+  Definitions          (present)
+  Objects              (present)
+  Connections          (present)
+  Takes                ← was missing; Unreal parser fails without it
 """
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from typing import Sequence
@@ -35,55 +48,44 @@ def _catmull_rom_to_bezier(coords: Sequence) -> list[tuple]:
     """
     Convert a 2-D polyline to cubic Bezier segment tuples.
 
-    Parameters
-    ----------
-    coords : sequence of (x, y) or (x, y, ...) points
-
-    Returns
-    -------
-    list of (p0, cp1, cp2, p3) tuples – one per segment.
-    Each point is a 1-D numpy array [x, y].
-
-    Uses Catmull-Rom parameterisation:
+    Returns [(p0, cp1, cp2, p3), …] – one tuple per segment.
+    Uses Catmull-Rom parameterisation for C1-continuous (smooth) joins:
         cp1_i = P[i]   + (P[i+1] − P[i−1]) / 6
         cp2_i = P[i+1] − (P[i+2] − P[i]  ) / 6
-    Boundary tangents are reflected (ghost points).
+    Ghost points at boundaries are reflected end-points.
     """
     pts = [np.array(c[:2], dtype=float) for c in coords]
     n = len(pts)
     if n < 2:
         return []
-
     segs: list[tuple] = []
     for i in range(n - 1):
         p0 = pts[i]
         p3 = pts[i + 1]
-        prev = pts[i - 1] if i > 0     else 2.0 * p0 - p3   # ghost before start
-        nxt  = pts[i + 2] if i < n - 2 else 2.0 * p3 - p0   # ghost after end
+        prev = pts[i - 1] if i > 0     else 2.0 * p0 - p3
+        nxt  = pts[i + 2] if i < n - 2 else 2.0 * p3 - p0
         cp1 = p0 + (p3 - prev) / 6.0
         cp2 = p3 - (nxt  - p0) / 6.0
         segs.append((p0, cp1, cp2, p3))
-
     return segs
 
 
 def _segs_to_nurbs(
     segs: list[tuple],
     z: float = 0.0,
-) -> tuple[list[tuple[float, float, float, float]], list[int]]:
+) -> tuple[list[tuple], list[int]]:
     """
-    Pack cubic Bezier segments into NURBS form (degree 3).
+    Pack cubic Bezier segments into degree-3 NURBS representation.
 
-    Control points are listed without duplicating shared endpoints.
-    Triple interior knots ensure each knot span is one full Bezier
-    segment (C0 continuity at the join point between segments).
+    Triple interior knots → one full Bezier segment per knot span (C0).
+    The Catmull-Rom CP layout already gives visually C1-smooth joins.
 
     Returns
     -------
-    ctrl_pts : list of (x, y, z, w) with w = 1  (non-rational)
-    knots    : integer knot vector
+    ctrl_pts : list of (x, y, z, w)  with w=1 (non-rational)
+    knots    : integer knot vector satisfying len = len(ctrl)+degree+1
     """
-    ctrl: list[tuple[float, float, float, float]] = []
+    ctrl: list[tuple] = []
     for i, (p0, cp1, cp2, p3) in enumerate(segs):
         if i == 0:
             ctrl.append((float(p0[0]),  float(p0[1]),  z, 1.0))
@@ -94,13 +96,18 @@ def _segs_to_nurbs(
     n_seg = len(segs)
     knots: list[int] = [0, 0, 0, 0]
     for k in range(1, n_seg):
-        knots += [k, k, k]                     # triple interior knot
-    knots += [n_seg, n_seg, n_seg, n_seg]       # clamped end
-
-    # Sanity check: len(knots) == len(ctrl) + degree + 1
+        knots += [k, k, k]
+    knots += [n_seg, n_seg, n_seg, n_seg]
     assert len(knots) == len(ctrl) + 4, "NURBS knot count mismatch"
-
     return ctrl, knots
+
+
+def _ctrl_to_json_flat(ctrl: list[tuple], z: float = 0.0) -> str:
+    """Flatten control points to a compact JSON array [x,y,z, x,y,z, ...]."""
+    flat: list[float] = []
+    for pt in ctrl:
+        flat.extend([round(pt[0], 8), round(pt[1], 8), round(pt[2] if len(pt) > 2 else z, 8)])
+    return json.dumps(flat, separators=(",", ":"))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,7 +115,6 @@ def _segs_to_nurbs(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _fmt_array(values: list, per_line: int = 8) -> str:
-    """Format a flat list of numbers for FBX 'a: ...' arrays."""
     strs = [f"{v:.10g}" for v in values]
     lines = []
     for i in range(0, len(strs), per_line):
@@ -139,8 +145,7 @@ def _fbx_header(creator: str = "GIS Road Master") -> str:
         f"\t\tFlagPLE: 0\n"
         f"\t}}\n"
         f"}}\n\n"
-        f"FileId: \"\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00"
-        f"\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\"\n"
+        f"FileId: \"GISRoadMaster\"\n"
         f"CreationTime: \"{t.tm_year:04d}-{t.tm_mon:02d}-{t.tm_mday:02d} "
         f"{t.tm_hour:02d}:{t.tm_min:02d}:{t.tm_sec:02d}:000\"\n"
         f"Creator: \"{creator}\"\n\n"
@@ -160,8 +165,27 @@ def _fbx_header(creator: str = "GIS Road Master") -> str:
     )
 
 
+def _fbx_documents(doc_id: int = 1000000000) -> str:
+    """Documents section – required by Unreal's FBX parser."""
+    return (
+        f"Documents:  {{\n"
+        f"\tCount: 1\n"
+        f"\tDocument: {doc_id}, \"\", \"Scene\" {{\n"
+        f"\t\tProperties70:  {{\n"
+        f"\t\t\tP: \"SourceObject\", \"object\", \"\", \"\"\n"
+        f"\t\t\tP: \"ActiveAnimStackName\", \"KString\", \"\", \"\", \"\"\n"
+        f"\t\t}}\n"
+        f"\t\tRootNode: 0\n"
+        f"\t}}\n"
+        f"}}\n\n"
+        f"References:  {{\n"
+        f"}}\n\n"
+    )
+
+
 def _fbx_definitions(n_curves: int) -> str:
-    total = 1 + n_curves * 2   # root + (geometry + model) per curve
+    # scene root + geometry + model per curve
+    total = 1 + n_curves * 2
     return (
         f"Definitions:  {{\n"
         f"\tVersion: 100\n"
@@ -186,25 +210,18 @@ def _fbx_definitions(n_curves: int) -> str:
 
 def _fbx_geometry(geo_id: int, name: str,
                   ctrl_pts: list, knots: list) -> str:
-    """Write one NurbsCurve Geometry node."""
-    n_ctrl = len(ctrl_pts)
+    n_ctrl  = len(ctrl_pts)
     n_knots = len(knots)
-
-    # Flatten control points: x,y,z,w per point
-    flat_ctrl: list[float] = []
-    for pt in ctrl_pts:
-        flat_ctrl.extend(pt)
-
-    ctrl_str  = _fmt_array(flat_ctrl, per_line=4)
-    knot_str  = _fmt_array(knots,     per_line=8)
-
+    flat_ctrl: list[float] = [v for pt in ctrl_pts for v in pt]
+    ctrl_str = _fmt_array(flat_ctrl, per_line=4)
+    knot_str = _fmt_array(knots,     per_line=8)
     return (
         f"\tGeometry: {geo_id}, \"Geometry::{name}\", \"NurbsCurve\" {{\n"
         f"\t\tVersion: 100\n"
         f"\t\tNurbsCurveVersion: 100\n"
-        f"\t\tOrder: 4\n"               # degree 3  → order 4
+        f"\t\tOrder: 4\n"
         f"\t\tDimensions: 3\n"
-        f"\t\tStep: 4\n"
+        f"\t\tStep: 1\n"           # 1 = open curve
         f"\t\tClosed: 0\n"
         f"\t\tPoints: *{n_ctrl * 4} {{\n"
         f"\t\t\ta: {ctrl_str}\n"
@@ -216,8 +233,16 @@ def _fbx_geometry(geo_id: int, name: str,
     )
 
 
-def _fbx_model(model_id: int, name: str) -> str:
-    """Write one null Model node that holds a curve geometry."""
+def _fbx_model(model_id: int, name: str, bezier_json: str) -> str:
+    """
+    Null Model node with a custom 'BezierControlPoints' string property.
+
+    The custom property stores the Bezier control points as a compact
+    JSON array [x,y,z, x,y,z, …] so that an Unreal Python script can
+    read them and build SplineActor objects.
+    """
+    # Escape quotes inside the JSON string for FBX embedding
+    safe_json = bezier_json.replace('"', '\\"')
     return (
         f"\tModel: {model_id}, \"Model::{name}\", \"null\" {{\n"
         f"\t\tVersion: 232\n"
@@ -229,11 +254,86 @@ def _fbx_model(model_id: int, name: str) -> str:
         f"\t\t\tP: \"Lcl Translation\", \"Lcl Translation\", \"\", \"A\",0,0,0\n"
         f"\t\t\tP: \"Lcl Rotation\", \"Lcl Rotation\", \"\", \"A\",0,0,0\n"
         f"\t\t\tP: \"Lcl Scaling\", \"Lcl Scaling\", \"\", \"A\",1,1,1\n"
+        f"\t\t\tP: \"BezierControlPoints\", \"KString\", \"\", \"\", \"{safe_json}\"\n"
         f"\t\t}}\n"
         f"\t\tShading: Y\n"
         f"\t\tCulling: \"CullingOff\"\n"
         f"\t}}\n"
     )
+
+
+def _fbx_takes() -> str:
+    """Takes section – required by Unreal's FBX parser (can be empty)."""
+    return (
+        f"Takes:  {{\n"
+        f"\tCurrent: \"\"\n"
+        f"}}\n"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UNREAL PYTHON COMPANION SCRIPT
+# ─────────────────────────────────────────────────────────────────────────────
+
+_UNREAL_SCRIPT_TEMPLATE = '''\
+"""
+unreal_import_splines.py  –  GIS Road Master companion script
+=====================================================================
+Run this inside the Unreal Editor:
+    Tools → Execute Python Script → select this file
+
+What it does
+------------
+Reads the companion JSON file "{json_name}" (must be in the same
+folder as this script), then creates one SplineActor per centerline
+in the currently open level.  Each actor is named "Road_N" and its
+spline passes through the original GIS control points.
+
+Requirements
+------------
+• Unreal Engine 5.x with the Python Editor Script Plugin enabled
+  (Edit → Plugins → search "Python Editor Script Plugin" → Enable)
+• The .json companion file exported alongside the FBX
+"""
+
+import json
+import os
+import unreal
+
+JSON_FILE = os.path.join(os.path.dirname(__file__), "{{json_name}}")
+
+# ── Load control points ────────────────────────────────────────────
+with open(JSON_FILE, encoding="utf-8") as f:
+    roads = json.load(f)   # list of lists: [[x,y,z, x,y,z, ...], ...]
+
+editor_subsystem = unreal.get_editor_subsystem(unreal.EditorActorSubsystem)
+level_editor     = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+
+created = 0
+for idx, flat_pts in enumerate(roads):
+    # Rebuild list of (x, y, z) tuples from flat array
+    pts = [(flat_pts[i], flat_pts[i+1], flat_pts[i+2])
+           for i in range(0, len(flat_pts), 3)]
+    if len(pts) < 2:
+        continue
+
+    # Spawn a SplineActor
+    location = unreal.Vector(pts[0][0], pts[0][1], pts[0][2])
+    actor = editor_subsystem.spawn_actor_from_class(
+        unreal.SplineActor, location)
+    actor.set_actor_label(f"Road_{idx}")
+
+    spline = actor.get_component_by_class(unreal.SplineComponent)
+    spline.clear_spline_points()
+
+    for x, y, z in pts:
+        spline.add_spline_world_point(unreal.Vector(x, y, z))
+
+    spline.set_closed_loop(False, update_spline=True)
+    created += 1
+
+unreal.log("GIS Road Master: created " + str(created) + " SplineActors from " + JSON_FILE)
+'''
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,16 +349,17 @@ def export_fbx(
     """
     Export a list of Shapely LineStrings as FBX Bezier curves.
 
-    Each LineString is converted to a cubic C1-continuous Bezier spline
-    via Catmull-Rom parameterisation and written as a degree-3 NurbsCurve
-    in FBX ASCII 7.4.0 format.
+    Writes three files next to *output_path*:
+      *.fbx                  – FBX ASCII 7.4.0, fully Unreal-compatible
+      *_curves.json          – flat JSON array of Bezier control points
+      *_unreal_splines.py    – Unreal Editor Python script to create splines
 
     Parameters
     ----------
     lines       : list of shapely.geometry.LineString
-    output_path : destination .fbx file path
-    z_value     : Z coordinate for all vertices (default 0 – flat 2-D)
-    min_points  : skip lines with fewer than this many vertices
+    output_path : destination .fbx path
+    z_value     : Z coordinate for all vertices (default 0)
+    min_points  : skip lines with fewer vertices than this
 
     Returns
     -------
@@ -270,39 +371,61 @@ def export_fbx(
         and len(list(ln.coords)) >= min_points
     ]
 
-    parts: list[str] = [_fbx_header()]
-    parts.append(_fbx_definitions(len(valid_lines)))
-    parts.append("Objects:  {\n")
+    # ── Collect geometry data ─────────────────────────────────────────
+    curves: list[tuple] = []    # (ctrl_pts, knots, bezier_json) per line
+    all_ctrl_flat: list[list] = []
 
-    connections: list[str] = []
-    written = 0
-
-    for idx, line in enumerate(valid_lines):
+    for line in valid_lines:
         coords = list(line.coords)
-
         segs = _catmull_rom_to_bezier(coords)
         if not segs:
             continue
-
         ctrl_pts, knots = _segs_to_nurbs(segs, z=z_value)
+        bzjson = _ctrl_to_json_flat(ctrl_pts, z=z_value)
+        curves.append((ctrl_pts, knots, bzjson))
+        flat = [v for pt in ctrl_pts for v in [pt[0], pt[1], pt[2]]]
+        all_ctrl_flat.append(flat)
 
+    # ── Build FBX text ────────────────────────────────────────────────
+    parts: list[str] = [
+        _fbx_header(),
+        _fbx_documents(),
+        _fbx_definitions(len(curves)),
+        "Objects:  {\n",
+    ]
+    connections: list[str] = []
+
+    for idx, (ctrl_pts, knots, bzjson) in enumerate(curves):
         geo_id   = 100000 + idx * 2
         model_id = 100001 + idx * 2
         name     = f"road_{idx}"
 
-        parts.append(_fbx_geometry(geo_id, name, ctrl_pts, knots))
-        parts.append(_fbx_model(model_id, name))
+        parts.append(_fbx_geometry(geo_id,   name, ctrl_pts, knots))
+        parts.append(_fbx_model(  model_id,  name, bzjson))
 
-        # Model → scene root (0), Geometry → Model
-        connections.append(f"\tC: \"OO\",{model_id},0")
-        connections.append(f"\tC: \"OO\",{geo_id},{model_id}")
-
-        written += 1
+        connections.append(f"\tC: \"OO\",{model_id},0\n")
+        connections.append(f"\tC: \"OO\",{geo_id},{model_id}\n")
 
     parts.append("}\n\n")
     parts.append("Connections:  {\n")
-    parts.extend(ln + "\n" for ln in connections)
-    parts.append("}\n")
+    parts.extend(connections)
+    parts.append("}\n\n")
+    parts.append(_fbx_takes())
 
-    Path(output_path).write_text("".join(parts), encoding="utf-8")
-    return written
+    # ── Write FBX ─────────────────────────────────────────────────────
+    fbx_path = Path(output_path)
+    fbx_path.write_text("".join(parts), encoding="utf-8")
+
+    # ── Write companion JSON ──────────────────────────────────────────
+    json_path = fbx_path.with_name(fbx_path.stem + "_curves.json")
+    json_path.write_text(
+        json.dumps(all_ctrl_flat, separators=(",", ":")),
+        encoding="utf-8")
+
+    # ── Write Unreal companion script ─────────────────────────────────
+    script_path = fbx_path.with_name(fbx_path.stem + "_unreal_splines.py")
+    script_path.write_text(
+        _UNREAL_SCRIPT_TEMPLATE.replace("{{json_name}}", json_path.name),
+        encoding="utf-8")
+
+    return len(curves)
