@@ -46,7 +46,7 @@ from algorithms import (
     prune_dead_ends,
     snap_endpoints,
 )
-from predictor import CompletionEngine, Proposal
+from algorithms import chaikins_corner_cutting  # used by pencil tool
 from ui_components import DragSelectChecklist, SliderRow, StatusBar, make_button
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,11 +85,8 @@ class GISRoadMaster:
         self.precision_lines: list[LineString] = []
         self.eraser_history: list[tuple[int, LineString]] = []
         self.selected_box = None                   # shapely box geom
-        self._proposals: list[Proposal] = []       # network completion proposals
-        # Completion defaults (persisted between window opens)
-        self._comp_gap   = 0.008   # generous gap for typical road networks
-        self._comp_angle = 70.0   # soft – tangents 70° off-axis still score
-        self._comp_conf  = 0.05   # low floor – let the user see & reject extras
+        # Pencil tool: lines drawn this session (shown on main map immediately)
+        self._pencil_lines: list[LineString] = []
 
         # ── async state ──────────────────────────────────────────────────────
         self._queue: queue.Queue = queue.Queue()
@@ -152,8 +149,8 @@ class GISRoadMaster:
         make_button(act_frame, "APPLY EDITS TO GLOBAL MAP",
                     self._apply_precision, "success").pack(fill="x", pady=2)
         ttk.Separator(act_frame).pack(fill="x", pady=3)
-        make_button(act_frame, "PREDICT & COMPLETE NETWORK",
-                    self._run_completion, "warning").pack(fill="x", pady=2)
+        make_button(act_frame, "✏  PENCIL TOOL — Draw Lines",
+                    self._open_pencil_tool, "warning").pack(fill="x", pady=2)
         ttk.Separator(act_frame).pack(fill="x", pady=3)
         make_button(act_frame, "EXPORT FINAL GeoJSON",
                     self._export, "secondary").pack(fill="x", pady=2)
@@ -360,13 +357,6 @@ class GISRoadMaster:
             for line in self.precision_lines:
                 x, y = line.xy
                 ax.plot(x, y, color=C_PRECISION, linewidth=2.0, alpha=0.9)
-
-        if self._proposals:
-            for prop in self._proposals:
-                if prop.accepted:
-                    x, y = prop.line.xy
-                    ax.plot(x, y, color=C_CONNECTOR, linewidth=1.8,
-                            linestyle="--", alpha=0.80)
 
         if self.selected_box is not None:
             bx, by = self.selected_box.exterior.xy
@@ -599,140 +589,70 @@ class GISRoadMaster:
                             f"into the global map.")
 
     # ═════════════════════════════════════════════════════════════════════════
-    # NETWORK COMPLETION  (predict & complete gaps)
+    # PENCIL TOOL  (hand-drawn line completion)
     # ═════════════════════════════════════════════════════════════════════════
 
-    def _run_completion(
-        self,
-        max_gap: float | None = None,
-        max_angle_deg: float | None = None,
-        min_confidence: float | None = None,
-        rerun_cb=None,
-    ) -> None:
+    def _open_pencil_tool(self) -> None:
         """
-        Run the CompletionEngine and open (or refresh) the proposal window.
+        Open a dedicated drawing window.
 
-        Parameters default to the last-used values so settings persist between
-        runs.  `rerun_cb` is an optional callable to refresh an already-open
-        window instead of opening a new one.
+        Interaction model (Illustrator-style polyline pen):
+          Left-click          → place a vertex
+          Double-click        → finish & commit the current segment
+          Enter               → finish & commit
+          Z  /  Ctrl+Z        → undo the last placed vertex
+          Escape              → cancel the segment being drawn (keep committed ones)
+          Pan / Zoom toolbar  → suspended while a segment is in progress
+
+        Visual feedback:
+          Blue  (dim)  → existing master lines (background)
+          Yellow line  → segment being drawn (vertices placed so far)
+          Red dots     → individual vertices placed
+          Dashed line  → rubber-band preview from last vertex to cursor
+          Green        → committed segments this session
         """
         if not self.master_lines:
             messagebox.showinfo("Info", "Process the global map first.")
             return
 
-        # Persist settings
-        if max_gap        is not None: self._comp_gap   = max_gap
-        if max_angle_deg  is not None: self._comp_angle = max_angle_deg
-        if min_confidence is not None: self._comp_conf  = min_confidence
-
-        gap, ang, con = self._comp_gap, self._comp_angle, self._comp_conf
-        self._set_busy(True, "Finding dangling endpoints and scoring pairs…")
-
-        def _work():
-            engine = CompletionEngine(
-                self.master_lines,
-                max_gap=gap,
-                max_angle_deg=ang,
-                min_confidence=con,
-            )
-            return engine.run()
-
-        def _done(proposals: list) -> None:
-            self._proposals = proposals
-            n = len(proposals)
-            self._set_busy(False,
-                           f"Found {n} proposal{'s' if n != 1 else ''} — "
-                           "review in the completion window")
-            if rerun_cb:
-                # Refresh an already-open window
-                rerun_cb(proposals)
-            elif not proposals:
-                messagebox.showinfo(
-                    "No proposals",
-                    "No gap connections found with the current parameters.\n\n"
-                    "Try increasing Max Gap Distance or Max Angle.")
-            else:
-                self._show_completion_window()
-
-        self._launch_thread(_work, _done)
-
-    def _show_completion_window(self) -> None:
-        """
-        Open a Toplevel showing proposed connectors.
-
-        Colour legend:
-          • Orange dashed  → accepted (will be merged into the map)
-          • Slate dashed   → rejected (click to reject / un-reject)
-
-        Interactions:
-          Click a connector  → toggle accepted / rejected
-          A                  → accept all
-          R                  → reject all
-          Enter              → apply accepted and close
-        """
-        # Use a mutable list so _do_rerun / _refresh can replace contents
-        # while _redraw and _apply_and_close still reference the same object.
-        proposals: list[Proposal] = list(self._proposals)
-        if not proposals:
-            return
-
         top = tk.Toplevel(self.root)
-        top.title(f"Network Completion  —  {len(proposals)} proposals")
-        top.geometry("980x820")
+        top.title("✏  Pencil Tool — Draw Road Lines")
+        top.geometry("1100x840")
+        top.resizable(True, True)
 
-        # ── settings bar (replaces sidebar sliders) ───────────────────────
-        sf = ttk.LabelFrame(top, text=" Completion Parameters ", padding="6")
-        sf.pack(fill="x", padx=6, pady=(6, 0))
-        sf_inner = ttk.Frame(sf)
-        sf_inner.pack(fill="x")
+        # ── mutable drawing state ─────────────────────────────────────────
+        pts: list[tuple[float, float]] = []    # vertices of current segment
+        drawn: list[LineString] = []           # committed segments this session
+        bg_cache: list = [None]                # saved rasterised background
+        rubber_ln: list = [None]               # persistent rubber-band artist
 
-        # Gap slider
-        gap_col = ttk.Frame(sf_inner); gap_col.pack(side="left", expand=True, fill="x", padx=4)
-        ttk.Label(gap_col, text="Max Gap Distance", font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        gap_val_lbl = ttk.Label(gap_col, text=f"{self._comp_gap:.4f}")
-        gap_val_lbl.pack(anchor="e")
-        gap_scale = tk.Scale(gap_col, from_=0.0001, to=0.03, resolution=0.0001,
-                             orient="horizontal", showvalue=False,
-                             command=lambda v: gap_val_lbl.config(text=f"{float(v):.4f}"))
-        gap_scale.set(self._comp_gap); gap_scale.pack(fill="x")
-
-        # Angle slider
-        ang_col = ttk.Frame(sf_inner); ang_col.pack(side="left", expand=True, fill="x", padx=4)
-        ttk.Label(ang_col, text="Max Angle (°)", font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        ang_val_lbl = ttk.Label(ang_col, text=f"{self._comp_angle:.0f}")
-        ang_val_lbl.pack(anchor="e")
-        ang_scale = tk.Scale(ang_col, from_=10, to=90, resolution=5,
-                             orient="horizontal", showvalue=False,
-                             command=lambda v: ang_val_lbl.config(text=f"{float(v):.0f}"))
-        ang_scale.set(self._comp_angle); ang_scale.pack(fill="x")
-
-        # Confidence slider  (lower range – 0.01 lets users see near-miss proposals)
-        con_col = ttk.Frame(sf_inner); con_col.pack(side="left", expand=True, fill="x", padx=4)
-        ttk.Label(con_col, text="Min Confidence", font=("Segoe UI", 8, "bold")).pack(anchor="w")
-        con_val_lbl = ttk.Label(con_col, text=f"{self._comp_conf:.2f}")
-        con_val_lbl.pack(anchor="e")
-        con_scale = tk.Scale(con_col, from_=0.01, to=1.0, resolution=0.01,
-                             orient="horizontal", showvalue=False,
-                             command=lambda v: con_val_lbl.config(text=f"{float(v):.2f}"))
-        con_scale.set(self._comp_conf); con_scale.pack(fill="x")
-
-        # ── info / hint bar ───────────────────────────────────────────────
-        info = ttk.Frame(top, padding="4")
-        info.pack(fill="x")
-        ttk.Label(
+        # ── info bar ──────────────────────────────────────────────────────
+        info = ttk.Frame(top, padding="4 3")
+        info.pack(fill="x", side="top")
+        hint_lbl = ttk.Label(
             info,
-            text="  Click a connector to accept/reject  ·  "
-                 "A = accept all  ·  R = reject all  ·  Enter = apply & close",
+            text="  Click to place vertices  ·  Double-click or Enter to finish  "
+                 "·  Z = undo vertex  ·  Esc = cancel segment",
             font=("Segoe UI", 9),
-        ).pack(side="left")
-
+        )
+        hint_lbl.pack(side="left")
         count_lbl = ttk.Label(info, font=("Segoe UI", 9, "bold"))
         count_lbl.pack(side="right", padx=8)
 
-        # ── matplotlib canvas ──────────────────────────────────────────────
-        bg  = C_BG_DARK if BOOTSTRAP else "white"
-        fig = Figure(figsize=(9, 7), facecolor=bg)
-        ax  = fig.add_subplot(111)
+        # ── bottom button bar ─────────────────────────────────────────────
+        btn_bar = ttk.Frame(top, padding="6")
+        btn_bar.pack(fill="x", side="bottom")
+        make_button(btn_bar, "Undo Last Segment",
+                    lambda: _undo_segment(), "warning").pack(side="left", padx=4)
+        make_button(btn_bar, "Clear All Drawn",
+                    lambda: _clear_all(),   "danger").pack(side="left",  padx=4)
+        make_button(btn_bar, "Apply & Close",
+                    lambda: _apply_close(), "primary").pack(side="right", padx=4)
+
+        # ── matplotlib canvas ─────────────────────────────────────────────
+        fig_bg = C_BG_DARK if BOOTSTRAP else "white"
+        fig    = Figure(figsize=(10, 7), facecolor=fig_bg)
+        ax     = fig.add_subplot(111)
         ax.set_facecolor(C_BG_DARK if BOOTSTRAP else C_BG_LIGHT)
 
         cv = FigureCanvasTkAgg(fig, master=top)
@@ -742,141 +662,140 @@ class GISRoadMaster:
             tb = NavigationToolbar2Tk(cv, top)
         tb.update()
         tb.pack(side="bottom", fill="x")
-
-        # ── bottom buttons ─────────────────────────────────────────────────
-        btn_bar = ttk.Frame(top, padding="6")
-        btn_bar.pack(side="bottom", fill="x")
-        make_button(btn_bar, "Accept All",
-                    lambda: _toggle_all(True),  "success").pack(side="left",  padx=4)
-        make_button(btn_bar, "Reject All",
-                    lambda: _toggle_all(False), "danger").pack(side="left",   padx=4)
-        def _do_rerun():
-            def _refresh(new_props):
-                proposals.clear()
-                proposals.extend(new_props)
-                _redraw()
-            self._run_completion(
-                max_gap=float(gap_scale.get()),
-                max_angle_deg=float(ang_scale.get()),
-                min_confidence=float(con_scale.get()),
-                rerun_cb=_refresh,
-            )
-
-        make_button(btn_bar, "Re-run with Settings",
-                    _do_rerun, "warning").pack(side="left", padx=4)
-        make_button(btn_bar, "Apply Accepted & Close",
-                    lambda: (_apply_and_close()), "primary").pack(side="right", padx=4)
-
         cv.get_tk_widget().pack(fill="both", expand=True)
 
-        # ── drawing helpers ────────────────────────────────────────────────
-        # Map proposal index → matplotlib Line2D so we can find which was clicked
-        _artists: dict[int, object] = {}
+        # ── redraw helpers ────────────────────────────────────────────────
 
-        def _confidence_colour(score: float, accepted: bool) -> str:
-            if not accepted:
-                return C_CONN_REJ
-            # Gradient: low conf → amber, high conf → lime green
-            r = int(243 - (score ** 0.5) * 150)   # 243 → ~93
-            g = int(156 + (score ** 0.5) * 87)    # 156 → ~243
-            b = 18
-            r = max(0, min(255, r))
-            g = max(0, min(255, g))
-            return f"#{r:02x}{g:02x}{b:02x}"
-
-        def _redraw():
+        def _full_redraw() -> None:
+            """Redraw everything and cache the background for blit rubber-band."""
             ax.clear()
             ax.set_facecolor(C_BG_DARK if BOOTSTRAP else C_BG_LIGHT)
-            _artists.clear()
+            tc = "#dddddd" if BOOTSTRAP else "black"
 
-            # Existing master lines (background)
+            # Existing master lines – dimmed background
             for line in self.master_lines:
                 x, y = line.xy
-                ax.plot(x, y, color=C_GLOBAL, linewidth=1.0, alpha=0.55, zorder=1)
+                ax.plot(x, y, color=C_GLOBAL, linewidth=1.0, alpha=0.45, zorder=1)
 
-            # Proposals
-            n_acc = sum(1 for p in proposals if p.accepted)
-            for k, prop in enumerate(proposals):
-                x, y  = prop.line.xy
-                col   = _confidence_colour(prop.score, prop.accepted)
-                is_tj = getattr(prop, "kind", "gap") == "tjunction"
-                lw    = 2.2 if prop.accepted else 1.2
-                # T-junctions: solid line; gaps: dashed
-                ls    = "-" if (prop.accepted and is_tj) else "--" if prop.accepted else ":"
-                alpha = 0.95 if prop.accepted else 0.45
-                (artist,) = ax.plot(
-                    x, y,
-                    color=col, linewidth=lw, linestyle=ls, alpha=alpha,
-                    picker=6, label=str(k), zorder=3,
-                )
-                # Confidence label near the midpoint of the connector
-                mid = prop.line.interpolate(0.5, normalized=True)
-                ax.text(
-                    mid.x, mid.y,
-                    f"{prop.score:.2f}",
-                    fontsize=6,
-                    color=col,
-                    ha="center", va="center",
-                    zorder=4,
-                    alpha=0.8 if prop.accepted else 0.35,
-                )
-                _artists[id(artist)] = k
+            # Committed session segments
+            for line in drawn:
+                x, y = line.xy
+                ax.plot(x, y, color=C_PRECISION, linewidth=2.5, alpha=0.95, zorder=3)
 
-            tc = "#dddddd" if BOOTSTRAP else "black"
-            n_tj = sum(1 for p in proposals if getattr(p, "kind", "gap") == "tjunction")
+            # Current in-progress segment
+            if pts:
+                px = [p[0] for p in pts]
+                py = [p[1] for p in pts]
+                ax.plot(px, py, color="#ffd93d", linewidth=2.2, zorder=4)
+                ax.plot(px, py, "o", color="#ff6b6b", markersize=7, zorder=5)
+
+            n   = len(drawn)
+            st  = (f"drawing… {len(pts)} vertex/vertices — "
+                   "double-click or Enter to finish"
+                   if pts else "click to start a new segment")
             ax.set_title(
-                f"{len(proposals)} proposals  ({n_tj} T-junctions)  ·  {n_acc} accepted  "
-                f"·  solid = T-junction  ·  dashed = gap  ·  slate = rejected",
-                color=tc, fontsize=8,
-            )
-            count_lbl.config(text=f"{n_acc} / {len(proposals)} accepted")
+                f"{n} segment{'s' if n != 1 else ''} committed  ·  {st}",
+                color=tc, fontsize=9)
+            count_lbl.config(text=f"{n} segment{'s' if n != 1 else ''}")
+
+            # Add the rubber-band artist (invisible) BEFORE caching background
+            rubber_ln[0], = ax.plot(
+                [], [], color="#ffd93d", linewidth=1.5,
+                linestyle="--", alpha=0.85, zorder=6)
+
             cv.draw()
+            bg_cache[0] = fig.canvas.copy_from_bbox(ax.bbox)
 
-        def _on_pick(event):
-            try:
-                k = int(event.artist.get_label())
-            except (ValueError, AttributeError):
+        def _update_rubber(x: float, y: float) -> None:
+            """Blit only the rubber-band line — no full redraw needed."""
+            if bg_cache[0] is None or not pts or rubber_ln[0] is None:
                 return
-            if 0 <= k < len(proposals):
-                proposals[k].accepted = not proposals[k].accepted
-                _redraw()
+            fig.canvas.restore_region(bg_cache[0])
+            rubber_ln[0].set_data([pts[-1][0], x], [pts[-1][1], y])
+            ax.draw_artist(rubber_ln[0])
+            fig.canvas.blit(ax.bbox)
 
-        def _on_key(event):
-            if event.key == "a":
-                _toggle_all(True)
-            elif event.key == "r":
-                _toggle_all(False)
-            elif event.key == "enter":
-                _apply_and_close()
+        # ── finish / commit ────────────────────────────────────────────────
 
-        def _toggle_all(state: bool):
-            for p in proposals:
-                p.accepted = state
-            _redraw()
+        def _finish_segment() -> None:
+            if len(pts) < 2:
+                pts.clear()
+                _full_redraw()
+                return
+            coords = list(pts)
+            pts.clear()
+            # Smooth with the current Smoothing slider value
+            smooth = int(self._s_smooth.get())
+            if smooth > 0:
+                coords = [tuple(p) for p in
+                          chaikins_corner_cutting(coords, smooth)]
+            drawn.append(LineString(coords))
+            _full_redraw()
 
-        def _apply_and_close():
-            self._apply_completion(proposals)
+        # ── matplotlib event handlers ─────────────────────────────────────
+
+        def _on_click(event: object) -> None:
+            if tb.mode:                  # pan/zoom tool active → ignore
+                return
+            if event.inaxes != ax:
+                return
+            if event.xdata is None or event.ydata is None:
+                return
+
+            if event.dblclick:
+                # Single-click already added the point; just finish.
+                _finish_segment()
+            else:
+                pts.append((event.xdata, event.ydata))
+                _full_redraw()
+
+        def _on_move(event: object) -> None:
+            if event.inaxes != ax or not pts:
+                return
+            if event.xdata is None or event.ydata is None:
+                return
+            _update_rubber(event.xdata, event.ydata)
+
+        def _on_key(event: object) -> None:
+            k = event.key
+            if k == "enter" and len(pts) >= 2:
+                _finish_segment()
+            elif k in ("z", "ctrl+z") and pts:
+                pts.pop()
+                _full_redraw()
+            elif k == "escape":
+                pts.clear()
+                _full_redraw()
+
+        # ── button callbacks ──────────────────────────────────────────────
+
+        def _undo_segment() -> None:
+            if drawn:
+                drawn.pop()
+                _full_redraw()
+
+        def _clear_all() -> None:
+            drawn.clear()
+            pts.clear()
+            _full_redraw()
+
+        def _apply_close() -> None:
+            if drawn:
+                self.master_lines = list(self.master_lines) + drawn
+                self._raw_lines   = list(self.master_lines)
+                self._pencil_lines.extend(drawn)
+                self._redraw_map()
+                n = len(drawn)
+                self.statusbar.set_message(
+                    f"Added {n} hand-drawn segment{'s' if n != 1 else ''} — "
+                    f"{len(self.master_lines)} total")
             top.destroy()
 
-        fig.canvas.mpl_connect("pick_event",      _on_pick)
-        fig.canvas.mpl_connect("key_press_event", _on_key)
-        _redraw()
-
-    def _apply_completion(self, proposals: list[Proposal]) -> None:
-        """Merge accepted connector lines into the global master map."""
-        accepted = [p.line for p in proposals if p.accepted]
-        if not accepted:
-            messagebox.showinfo("Nothing accepted",
-                                "No proposals were accepted — nothing changed.")
-            return
-        self.master_lines = list(self.master_lines) + accepted
-        self._raw_lines   = list(self.master_lines)
-        self._proposals   = []
-        self._redraw_map()
-        n = len(accepted)
-        self.statusbar.set_message(
-            f"Added {n} connector{'s' if n != 1 else ''} — "
-            f"{len(self.master_lines)} total segments")
+        # ── wire up events ────────────────────────────────────────────────
+        fig.canvas.mpl_connect("button_press_event",  _on_click)
+        fig.canvas.mpl_connect("motion_notify_event", _on_move)
+        fig.canvas.mpl_connect("key_press_event",     _on_key)
+        _full_redraw()
 
     # ═════════════════════════════════════════════════════════════════════════
     # EXPORT
