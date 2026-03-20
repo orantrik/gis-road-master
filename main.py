@@ -39,11 +39,11 @@ except ImportError:
     THEME = None
 
 from algorithms import (
-    apply_hints,
     apply_smoothing,
     chaikins_corner_cutting,
     export_geojson,
     lines_to_gdf,
+    METHOD_LABELS,
     process_segments,
     prune_dead_ends,
     snap_endpoints,
@@ -97,6 +97,10 @@ class GISRoadMaster:
         # Routing Hints – drawn strokes applied as post-snap during processing
         self._hint_lines: list[LineString] = []
         self._hint_snap_tol: float = 0.0003
+        # Method report from last process_segments call
+        self._method_report: list[dict] = []
+        # Manual algorithm selection (combobox)
+        self._manual_algo = tk.StringVar(value="straight_skeleton")
 
         # ── async state ──────────────────────────────────────────────────────
         self._queue: queue.Queue = queue.Queue()
@@ -206,7 +210,18 @@ class GISRoadMaster:
         }
         if BOOTSTRAP:
             cb_kw["bootstyle"] = "success-round-toggle"
-        ttk.Checkbutton(param_frame, **cb_kw).pack(anchor="w", pady=(0, 6))
+        ttk.Checkbutton(param_frame, **cb_kw).pack(anchor="w", pady=(0, 4))
+
+        # Algorithm selector (shown only in manual mode)
+        algo_row = ttk.Frame(param_frame)
+        algo_row.pack(fill="x", pady=(0, 4))
+        ttk.Label(algo_row, text="Algorithm:", font=("Segoe UI", 8)).pack(
+            side="left", padx=(0, 4))
+        self._algo_combo = ttk.Combobox(
+            algo_row, textvariable=self._manual_algo,
+            values=METHOD_LABELS, state="readonly", width=18)
+        self._algo_combo.pack(side="left")
+        self._algo_row = algo_row
 
         self._s_prune    = SliderRow(param_frame, "Pruning",
                                      0.0,    1.0,    0.10,   0.005,   "{:.3f}")
@@ -289,6 +304,9 @@ class GISRoadMaster:
         state = "disabled" if self._auto_var.get() else "normal"
         for sl in (self._s_prune, self._s_straight, self._s_smooth):
             sl.configure(state=state)
+        # Algorithm selector only useful in manual mode
+        self._algo_combo.configure(
+            state="disabled" if self._auto_var.get() else "readonly")
 
     def _on_smooth_change(self, val: float) -> None:
         """Live re-smooth without re-running the expensive centerline step."""
@@ -361,26 +379,44 @@ class GISRoadMaster:
         prune     = self._s_prune.get()
         straight  = self._s_straight.get()
         smooth    = int(self._s_smooth.get())
+        algo      = self._manual_algo.get()
         hints     = list(self._hint_lines)
         snap_tol  = self._hint_snap_tol
 
         def _work():
-            def _cb(cur, tot, _):
-                self._queue.put(("progress", cur / tot * 100,
-                                 f"Segment {cur} / {tot}"))
+            def _cb(cur, tot, info):
+                a = info.get("algorithm", "")
+                label = f"Segment {cur}/{tot}" + (f" · {a}" if a else "")
+                self._queue.put(("progress", cur / tot * 100, label))
             return process_segments(
                 df, use_auto=use_auto,
                 manual_prune=prune, manual_straight=straight,
-                manual_smooth=smooth, progress_cb=_cb,
+                manual_smooth=smooth, manual_algorithm=algo,
+                progress_cb=_cb,
                 hint_lines=hints, hint_snap_tol=snap_tol)
 
         self._launch_thread(_work, self._on_global_done)
 
-    def _on_global_done(self, lines: list) -> None:
+    def _on_global_done(self, result) -> None:
+        lines, report = result if isinstance(result, tuple) else (result, [])
+        self._method_report = report
         self._raw_lines   = [l for l in lines if l is not None and not l.is_empty]
         self.master_lines = self._apply_minlen(self._raw_lines)
         n = len(self.master_lines)
-        self._set_busy(False, f"Done — {n} centerline segment{'s' if n != 1 else ''}")
+
+        # Build method summary for status bar
+        from collections import Counter
+        algo_counts = Counter(r["algorithm"] for r in report)
+        if algo_counts:
+            summary = "  ·  ".join(
+                f"{cnt}× {algo}" for algo, cnt in algo_counts.most_common())
+        else:
+            summary = ""
+        msg = f"Done — {n} segment{'s' if n != 1 else ''}"
+        if summary:
+            msg += f"  [{summary}]"
+
+        self._set_busy(False, msg)
         if not self.master_lines:
             messagebox.showwarning("No results",
                                    "No centerlines could be extracted.\n"
@@ -497,14 +533,19 @@ class GISRoadMaster:
         self._set_busy(True, "Processing precision area…")
 
         def _work():
-            def _cb(c, t, _):
-                self._queue.put(("progress", c / t * 100, f"Segment {c}/{t}"))
+            def _cb(c, t, info):
+                a = info.get("algorithm", "")
+                label = f"Segment {c}/{t}" + (f" · {a}" if a else "")
+                self._queue.put(("progress", c / t * 100, label))
             return process_segments(
                 clipped, use_auto=use_auto,
                 manual_prune=prune, manual_straight=straight,
-                manual_smooth=smooth, progress_cb=_cb)
+                manual_smooth=smooth,
+                manual_algorithm=self._manual_algo.get(),
+                progress_cb=_cb)
 
-        def _done(lines: list) -> None:
+        def _done(result) -> None:
+            lines, _ = result if isinstance(result, tuple) else (result, [])
             raw = [l for l in lines if l is not None and not l.is_empty]
             self.precision_lines = self._apply_minlen(raw)
             self.eraser_history.clear()
