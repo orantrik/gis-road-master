@@ -46,6 +46,7 @@ from algorithms import (
     prune_dead_ends,
     snap_endpoints,
 )
+from predictor import CompletionEngine, Proposal
 from ui_components import DragSelectChecklist, SliderRow, StatusBar, make_button
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -57,11 +58,13 @@ FONT_BOLD   = ("Segoe UI", 10, "bold")
 FONT_HEADER = ("Segoe UI", 13, "bold")
 
 # Map colours
-C_GLOBAL    = "#4a9eff"   # blue   – global centerlines
-C_PRECISION = "#2ecc71"   # green  – precision edits
-C_BOX       = "#e74c3c"   # red    – edit-box outline
-C_BG_DARK   = "#16213e"
-C_BG_LIGHT  = "#f4f4f4"
+C_GLOBAL      = "#4a9eff"   # blue   – global centerlines
+C_PRECISION   = "#2ecc71"   # green  – precision edits
+C_BOX         = "#e74c3c"   # red    – edit-box outline
+C_CONNECTOR   = "#f39c12"   # orange – accepted predicted connector
+C_CONN_REJ    = "#555577"   # slate  – rejected predicted connector
+C_BG_DARK     = "#16213e"
+C_BG_LIGHT    = "#f4f4f4"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -82,6 +85,7 @@ class GISRoadMaster:
         self.precision_lines: list[LineString] = []
         self.eraser_history: list[tuple[int, LineString]] = []
         self.selected_box = None                   # shapely box geom
+        self._proposals: list[Proposal] = []       # network completion proposals
 
         # ── async state ──────────────────────────────────────────────────────
         self._queue: queue.Queue = queue.Queue()
@@ -144,8 +148,21 @@ class GISRoadMaster:
         make_button(act_frame, "APPLY EDITS TO GLOBAL MAP",
                     self._apply_precision, "success").pack(fill="x", pady=2)
         ttk.Separator(act_frame).pack(fill="x", pady=3)
+        make_button(act_frame, "PREDICT & COMPLETE NETWORK",
+                    self._run_completion, "warning").pack(fill="x", pady=2)
+        ttk.Separator(act_frame).pack(fill="x", pady=3)
         make_button(act_frame, "EXPORT FINAL GeoJSON",
                     self._export, "secondary").pack(fill="x", pady=2)
+
+        # ── Completion Parameters ──────────────────────────────────────────
+        comp_frame = ttk.LabelFrame(lf, text=" Completion Parameters ", padding="6")
+        comp_frame.pack(fill="x", side="bottom", **pad)
+        self._s_gap   = SliderRow(comp_frame, "Max Gap Distance",
+                                  0.0001, 0.02, 0.005, 0.0001, "{:.4f}")
+        self._s_angle = SliderRow(comp_frame, "Max Angle (°)",
+                                  10, 90, 50, 5, "{:.0f}")
+        self._s_conf  = SliderRow(comp_frame, "Min Confidence",
+                                  0.0, 1.0, 0.15, 0.05, "{:.2f}")
 
         # Parameters section (bottom, fixed) – also before filters
         param_frame = ttk.LabelFrame(lf, text=" Processing Parameters ", padding="6")
@@ -349,6 +366,13 @@ class GISRoadMaster:
             for line in self.precision_lines:
                 x, y = line.xy
                 ax.plot(x, y, color=C_PRECISION, linewidth=2.0, alpha=0.9)
+
+        if self._proposals:
+            for prop in self._proposals:
+                if prop.accepted:
+                    x, y = prop.line.xy
+                    ax.plot(x, y, color=C_CONNECTOR, linewidth=1.8,
+                            linestyle="--", alpha=0.80)
 
         if self.selected_box is not None:
             bx, by = self.selected_box.exterior.xy
@@ -579,6 +603,214 @@ class GISRoadMaster:
         messagebox.showinfo("Applied",
                             f"Merged {len(snapped)} precision lines "
                             f"into the global map.")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # NETWORK COMPLETION  (predict & complete gaps)
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def _run_completion(self) -> None:
+        """Run the CompletionEngine and open the interactive proposal window."""
+        if not self.master_lines:
+            messagebox.showinfo("Info", "Process the global map first.")
+            return
+
+        max_gap = self._s_gap.get()
+        max_ang = self._s_angle.get()
+        min_con = self._s_conf.get()
+
+        self._set_busy(True, "Finding dangling endpoints and scoring pairs…")
+
+        def _work():
+            engine = CompletionEngine(
+                self.master_lines,
+                max_gap=max_gap,
+                max_angle_deg=max_ang,
+                min_confidence=min_con,
+            )
+            return engine.run()
+
+        def _done(proposals: list) -> None:
+            self._proposals = proposals
+            n = len(proposals)
+            self._set_busy(False,
+                           f"Found {n} proposal{'s' if n != 1 else ''} — "
+                           "review in the completion window")
+            if not proposals:
+                messagebox.showinfo(
+                    "No proposals",
+                    "No gap connections found with the current parameters.\n\n"
+                    "Try increasing Max Gap Distance or Max Angle.")
+                return
+            self._show_completion_window()
+
+        self._launch_thread(_work, _done)
+
+    def _show_completion_window(self) -> None:
+        """
+        Open a Toplevel showing proposed connectors.
+
+        Colour legend:
+          • Orange dashed  → accepted (will be merged into the map)
+          • Slate dashed   → rejected (click to reject / un-reject)
+
+        Interactions:
+          Click a connector  → toggle accepted / rejected
+          A                  → accept all
+          R                  → reject all
+          Enter              → apply accepted and close
+        """
+        proposals = self._proposals
+        if not proposals:
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title(f"Network Completion  —  {len(proposals)} proposals")
+        top.geometry("980x760")
+
+        # ── info bar ──────────────────────────────────────────────────────
+        info = ttk.Frame(top, padding="4")
+        info.pack(fill="x")
+        ttk.Label(
+            info,
+            text="  Click a connector to accept/reject  ·  "
+                 "A = accept all  ·  R = reject all  ·  Enter = apply & close",
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+
+        count_lbl = ttk.Label(info, font=("Segoe UI", 9, "bold"))
+        count_lbl.pack(side="right", padx=8)
+
+        # ── matplotlib canvas ──────────────────────────────────────────────
+        bg  = C_BG_DARK if BOOTSTRAP else "white"
+        fig = Figure(figsize=(9, 7), facecolor=bg)
+        ax  = fig.add_subplot(111)
+        ax.set_facecolor(C_BG_DARK if BOOTSTRAP else C_BG_LIGHT)
+
+        cv = FigureCanvasTkAgg(fig, master=top)
+        try:
+            tb = NavigationToolbar2Tk(cv, top, pack_toolbar=False)
+        except TypeError:
+            tb = NavigationToolbar2Tk(cv, top)
+        tb.update()
+        tb.pack(side="bottom", fill="x")
+
+        # ── bottom buttons ─────────────────────────────────────────────────
+        btn_bar = ttk.Frame(top, padding="6")
+        btn_bar.pack(side="bottom", fill="x")
+        make_button(btn_bar, "Accept All",
+                    lambda: _toggle_all(True),  "success").pack(side="left",  padx=4)
+        make_button(btn_bar, "Reject All",
+                    lambda: _toggle_all(False), "danger").pack(side="left",   padx=4)
+        make_button(btn_bar, "Apply Accepted & Close",
+                    lambda: (_apply_and_close()), "primary").pack(side="right", padx=4)
+
+        cv.get_tk_widget().pack(fill="both", expand=True)
+
+        # ── drawing helpers ────────────────────────────────────────────────
+        # Map proposal index → matplotlib Line2D so we can find which was clicked
+        _artists: dict[int, object] = {}
+
+        def _confidence_colour(score: float, accepted: bool) -> str:
+            if not accepted:
+                return C_CONN_REJ
+            # Gradient: low conf → amber, high conf → lime green
+            r = int(243 - (score ** 0.5) * 150)   # 243 → ~93
+            g = int(156 + (score ** 0.5) * 87)    # 156 → ~243
+            b = 18
+            r = max(0, min(255, r))
+            g = max(0, min(255, g))
+            return f"#{r:02x}{g:02x}{b:02x}"
+
+        def _redraw():
+            ax.clear()
+            ax.set_facecolor(C_BG_DARK if BOOTSTRAP else C_BG_LIGHT)
+            _artists.clear()
+
+            # Existing master lines (background)
+            for line in self.master_lines:
+                x, y = line.xy
+                ax.plot(x, y, color=C_GLOBAL, linewidth=1.0, alpha=0.55, zorder=1)
+
+            # Proposals
+            n_acc = sum(1 for p in proposals if p.accepted)
+            for k, prop in enumerate(proposals):
+                x, y  = prop.line.xy
+                col   = _confidence_colour(prop.score, prop.accepted)
+                lw    = 2.2 if prop.accepted else 1.2
+                ls    = "--" if prop.accepted else ":"
+                alpha = 0.95 if prop.accepted else 0.45
+                (artist,) = ax.plot(
+                    x, y,
+                    color=col, linewidth=lw, linestyle=ls, alpha=alpha,
+                    picker=6, label=str(k), zorder=3,
+                )
+                # Confidence label near the midpoint of the connector
+                mid = prop.line.interpolate(0.5, normalized=True)
+                ax.text(
+                    mid.x, mid.y,
+                    f"{prop.score:.2f}",
+                    fontsize=6,
+                    color=col,
+                    ha="center", va="center",
+                    zorder=4,
+                    alpha=0.8 if prop.accepted else 0.35,
+                )
+                _artists[id(artist)] = k
+
+            tc = "#dddddd" if BOOTSTRAP else "black"
+            ax.set_title(
+                f"Proposals: {len(proposals)} total  ·  {n_acc} accepted  "
+                f"(orange/green = accepted, slate = rejected)",
+                color=tc, fontsize=9,
+            )
+            count_lbl.config(text=f"{n_acc} / {len(proposals)} accepted")
+            cv.draw()
+
+        def _on_pick(event):
+            try:
+                k = int(event.artist.get_label())
+            except (ValueError, AttributeError):
+                return
+            if 0 <= k < len(proposals):
+                proposals[k].accepted = not proposals[k].accepted
+                _redraw()
+
+        def _on_key(event):
+            if event.key == "a":
+                _toggle_all(True)
+            elif event.key == "r":
+                _toggle_all(False)
+            elif event.key == "enter":
+                _apply_and_close()
+
+        def _toggle_all(state: bool):
+            for p in proposals:
+                p.accepted = state
+            _redraw()
+
+        def _apply_and_close():
+            self._apply_completion(proposals)
+            top.destroy()
+
+        fig.canvas.mpl_connect("pick_event",      _on_pick)
+        fig.canvas.mpl_connect("key_press_event", _on_key)
+        _redraw()
+
+    def _apply_completion(self, proposals: list[Proposal]) -> None:
+        """Merge accepted connector lines into the global master map."""
+        accepted = [p.line for p in proposals if p.accepted]
+        if not accepted:
+            messagebox.showinfo("Nothing accepted",
+                                "No proposals were accepted — nothing changed.")
+            return
+        self.master_lines = list(self.master_lines) + accepted
+        self._raw_lines   = list(self.master_lines)
+        self._proposals   = []
+        self._redraw_map()
+        n = len(accepted)
+        self.statusbar.set_message(
+            f"Added {n} connector{'s' if n != 1 else ''} — "
+            f"{len(self.master_lines)} total segments")
 
     # ═════════════════════════════════════════════════════════════════════════
     # EXPORT
