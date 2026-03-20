@@ -25,7 +25,7 @@ import pandas as pd
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 from matplotlib.widgets import RectangleSelector
-from shapely.geometry import LineString, MultiLineString, Point
+from shapely.geometry import LineString, MultiLineString, Point, box as shapely_box
 from shapely.ops import snap, unary_union
 
 try:
@@ -39,14 +39,15 @@ except ImportError:
     THEME = None
 
 from algorithms import (
+    apply_hints,
     apply_smoothing,
+    chaikins_corner_cutting,
     export_geojson,
     lines_to_gdf,
     process_segments,
     prune_dead_ends,
     snap_endpoints,
 )
-from algorithms import chaikins_corner_cutting  # used by pencil tool
 from ui_components import DragSelectChecklist, SliderRow, StatusBar, make_button
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -58,11 +59,15 @@ FONT_BOLD   = ("Segoe UI", 10, "bold")
 FONT_HEADER = ("Segoe UI", 13, "bold")
 
 # Map colours
-C_GLOBAL      = "#4a9eff"   # blue   – global centerlines
-C_PRECISION   = "#2ecc71"   # green  – precision edits
-C_BOX         = "#e74c3c"   # red    – edit-box outline
-C_CONNECTOR   = "#f39c12"   # orange – accepted predicted connector
-C_CONN_REJ    = "#555577"   # slate  – rejected predicted connector
+C_GLOBAL      = "#4a9eff"   # blue     – global centerlines
+C_PRECISION   = "#2ecc71"   # green    – precision edits
+C_BOX         = "#e74c3c"   # red      – edit-box outline
+C_CONNECTOR   = "#f39c12"   # orange   – connector preview
+C_CONN_REJ    = "#555577"   # slate    – rejected connector
+C_HINT        = "#c678dd"   # purple   – routing hint strokes
+C_POLY_ACT    = "#2980b9"   # blue     – active polygon in shape builder
+C_POLY_SEL    = "#e67e22"   # orange   – selected polygon
+C_POLY_EXC    = "#922b21"   # red      – excluded polygon
 C_BG_DARK     = "#16213e"
 C_BG_LIGHT    = "#f4f4f4"
 
@@ -85,8 +90,13 @@ class GISRoadMaster:
         self.precision_lines: list[LineString] = []
         self.eraser_history: list[tuple[int, LineString]] = []
         self.selected_box = None                   # shapely box geom
-        # Pencil tool: lines drawn this session (shown on main map immediately)
+        # Pencil tool
         self._pencil_lines: list[LineString] = []
+        # Shape Builder – polygons after user merge/exclude (None = use filters)
+        self._shape_built_geoms: list | None = None
+        # Routing Hints – drawn strokes applied as post-snap during processing
+        self._hint_lines: list[LineString] = []
+        self._hint_snap_tol: float = 0.0003
 
         # ── async state ──────────────────────────────────────────────────────
         self._queue: queue.Queue = queue.Queue()
@@ -139,9 +149,32 @@ class GISRoadMaster:
         act_frame = ttk.LabelFrame(lf, text=" Actions ", padding="6")
         act_frame.pack(fill="x", side="bottom", **pad)
 
+        # ── Step 1: Prepare ──────────────────────────────────────────────
+        ttk.Label(act_frame, text="① PREPARE",
+                  font=("Segoe UI", 7, "bold"),
+                  foreground="#888888").pack(anchor="w", pady=(0, 1))
+        make_button(act_frame, "◈  SHAPE BUILDER",
+                    self._open_shape_builder, "info").pack(fill="x", pady=1)
+        self._shape_lbl = ttk.Label(act_frame, text="  no shape override",
+                                    font=("Segoe UI", 7), foreground="#666666")
+        self._shape_lbl.pack(anchor="w")
+        make_button(act_frame, "〰  DRAW ROUTING HINTS",
+                    self._open_hint_tool, "info").pack(fill="x", pady=1)
+        self._hint_lbl = ttk.Label(act_frame, text="  no hints",
+                                   font=("Segoe UI", 7), foreground="#666666")
+        self._hint_lbl.pack(anchor="w")
+        ttk.Separator(act_frame).pack(fill="x", pady=3)
+        # ── Step 2: Process ──────────────────────────────────────────────
+        ttk.Label(act_frame, text="② PROCESS",
+                  font=("Segoe UI", 7, "bold"),
+                  foreground="#888888").pack(anchor="w", pady=(0, 1))
         make_button(act_frame, "PROCESS GLOBAL MAP",
                     self._process_global, "primary").pack(fill="x", pady=2)
         ttk.Separator(act_frame).pack(fill="x", pady=3)
+        # ── Step 3: Refine ───────────────────────────────────────────────
+        ttk.Label(act_frame, text="③ REFINE",
+                  font=("Segoe UI", 7, "bold"),
+                  foreground="#888888").pack(anchor="w", pady=(0, 1))
         make_button(act_frame, "DRAW EDIT BOX",
                     self._start_box_draw, "warning").pack(fill="x", pady=2)
         make_button(act_frame, "OPEN PRECISION EDITOR",
@@ -149,9 +182,14 @@ class GISRoadMaster:
         make_button(act_frame, "APPLY EDITS TO GLOBAL MAP",
                     self._apply_precision, "success").pack(fill="x", pady=2)
         ttk.Separator(act_frame).pack(fill="x", pady=3)
+        # ── Step 4: Draw ─────────────────────────────────────────────────
+        ttk.Label(act_frame, text="④ DRAW",
+                  font=("Segoe UI", 7, "bold"),
+                  foreground="#888888").pack(anchor="w", pady=(0, 1))
         make_button(act_frame, "✏  PENCIL TOOL — Draw Lines",
                     self._open_pencil_tool, "warning").pack(fill="x", pady=2)
         ttk.Separator(act_frame).pack(fill="x", pady=3)
+        # ── Step 5: Export ───────────────────────────────────────────────
         make_button(act_frame, "EXPORT FINAL GeoJSON",
                     self._export, "secondary").pack(fill="x", pady=2)
 
@@ -304,17 +342,27 @@ class GISRoadMaster:
     # ═════════════════════════════════════════════════════════════════════════
 
     def _process_global(self) -> None:
-        df = self._get_filtered_gdf()
-        if df is None:
-            messagebox.showwarning("No data",
-                                   "No features match the current filters.")
-            return
+        # Use shape-builder result if available, otherwise fall back to filters
+        if self._shape_built_geoms is not None:
+            crs = self.gdf.crs if self.gdf is not None else None
+            df = gpd.GeoDataFrame(geometry=self._shape_built_geoms, crs=crs)
+            if df.empty:
+                messagebox.showwarning("No data", "Shape Builder has no active polygons.")
+                return
+        else:
+            df = self._get_filtered_gdf()
+            if df is None:
+                messagebox.showwarning("No data",
+                                       "No features match the current filters.")
+                return
 
         self._set_busy(True, "Processing road segments…")
         use_auto  = self._auto_var.get()
         prune     = self._s_prune.get()
         straight  = self._s_straight.get()
         smooth    = int(self._s_smooth.get())
+        hints     = list(self._hint_lines)
+        snap_tol  = self._hint_snap_tol
 
         def _work():
             def _cb(cur, tot, _):
@@ -323,7 +371,8 @@ class GISRoadMaster:
             return process_segments(
                 df, use_auto=use_auto,
                 manual_prune=prune, manual_straight=straight,
-                manual_smooth=smooth, progress_cb=_cb)
+                manual_smooth=smooth, progress_cb=_cb,
+                hint_lines=hints, hint_snap_tol=snap_tol)
 
         self._launch_thread(_work, self._on_global_done)
 
@@ -357,6 +406,12 @@ class GISRoadMaster:
             for line in self.precision_lines:
                 x, y = line.xy
                 ax.plot(x, y, color=C_PRECISION, linewidth=2.0, alpha=0.9)
+
+        if self._hint_lines:
+            for hl in self._hint_lines:
+                x, y = hl.xy
+                ax.plot(x, y, color=C_HINT, linewidth=1.8,
+                        linestyle="--", alpha=0.80, zorder=4)
 
         if self.selected_box is not None:
             bx, by = self.selected_box.exterior.xy
@@ -587,6 +642,466 @@ class GISRoadMaster:
         messagebox.showinfo("Applied",
                             f"Merged {len(snapped)} precision lines "
                             f"into the global map.")
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # SHAPE BUILDER  (polygon preview + merge before centerline extraction)
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def _open_shape_builder(self) -> None:
+        """
+        Interactive polygon preview with Illustrator Shape-Builder-style merging.
+
+        Interactions
+        ------------
+        Left-click       → select / deselect a polygon
+        Left-drag        → box-select all polygons whose centroid falls inside
+        Right-click      → toggle exclude (red) / restore a polygon
+        Ctrl+click       → add to selection without clearing others
+        Merge Selected   → union all selected polygons into one
+        Ctrl+Z           → undo last merge
+        Reset            → restore original filtered polygons
+        ▶ Use These      → send current polygons to centerline processing
+        """
+        df = self._get_filtered_gdf()
+        if df is None or df.empty:
+            messagebox.showinfo("Info", "Load a file and apply filters first.")
+            return
+
+        top = tk.Toplevel(self.root)
+        top.title("◈  Shape Builder — Merge / Exclude Polygons")
+        top.geometry("1100x840")
+        top.resizable(True, True)
+
+        # ── mutable state ─────────────────────────────────────────────────
+        items: list[dict] = [
+            {"geom": geom, "sel": False, "excl": False}
+            for geom in df.geometry
+            if geom is not None and not geom.is_empty
+        ]
+        history: list[list[dict]] = []   # undo stack (full snapshots)
+        drag_origin: list = [None]        # [x0, y0, button] or None
+        drag_rect_art: list = [None]      # matplotlib Rectangle artist
+
+        # ── canvas ────────────────────────────────────────────────────────
+        fig_bg = C_BG_DARK if BOOTSTRAP else "white"
+        fig    = Figure(figsize=(10, 7), facecolor=fig_bg)
+        ax     = fig.add_subplot(111)
+        ax.set_facecolor(C_BG_DARK if BOOTSTRAP else C_BG_LIGHT)
+
+        cv = FigureCanvasTkAgg(fig, master=top)
+        try:
+            tb_w = NavigationToolbar2Tk(cv, top, pack_toolbar=False)
+        except TypeError:
+            tb_w = NavigationToolbar2Tk(cv, top)
+        tb_w.update()
+        tb_w.pack(side="bottom", fill="x")
+
+        # ── info bar ──────────────────────────────────────────────────────
+        info = ttk.Frame(top, padding="4 3")
+        info.pack(fill="x", side="top")
+        ttk.Label(
+            info,
+            text="  Left-click = select  ·  Drag = box-select  ·  "
+                 "Right-click = exclude/restore  ·  Ctrl+Z = undo merge",
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+        stat_lbl = ttk.Label(info, font=("Segoe UI", 9, "bold"))
+        stat_lbl.pack(side="right", padx=8)
+
+        # ── button bar ────────────────────────────────────────────────────
+        btn_bar = ttk.Frame(top, padding="6")
+        btn_bar.pack(fill="x", side="bottom")
+        cv.get_tk_widget().pack(fill="both", expand=True)
+
+        # ── helpers ───────────────────────────────────────────────────────
+
+        def _snapshot():
+            import copy
+            return [{"geom": it["geom"],
+                     "sel": it["sel"], "excl": it["excl"]} for it in items]
+
+        def _full_redraw():
+            ax.clear()
+            ax.set_facecolor(C_BG_DARK if BOOTSTRAP else C_BG_LIGHT)
+            tc = "#dddddd" if BOOTSTRAP else "black"
+
+            n_sel  = sum(1 for it in items if it["sel"] and not it["excl"])
+            n_act  = sum(1 for it in items if not it["excl"])
+            n_excl = sum(1 for it in items if it["excl"])
+            area   = sum(it["geom"].area for it in items if not it["excl"])
+
+            for it in items:
+                try:
+                    gdf_tmp = gpd.GeoDataFrame(geometry=[it["geom"]])
+                    if it["excl"]:
+                        gdf_tmp.plot(ax=ax, color=C_POLY_EXC,
+                                     edgecolor="#ff8888", alpha=0.40, linewidth=0.8)
+                    elif it["sel"]:
+                        gdf_tmp.plot(ax=ax, color=C_POLY_SEL,
+                                     edgecolor="#ffffff", alpha=0.80, linewidth=1.2)
+                    else:
+                        gdf_tmp.plot(ax=ax, color=C_POLY_ACT,
+                                     edgecolor="#88bbdd", alpha=0.50, linewidth=0.6)
+                except Exception:
+                    pass
+
+            ax.set_title(
+                f"{n_act} active  ·  {n_excl} excluded  ·  "
+                f"{n_sel} selected  ·  area = {area:.6f}",
+                color=tc, fontsize=9)
+            stat_lbl.config(
+                text=f"{n_act} polygons  |  {n_sel} selected  |  area {area:.5f}")
+            cv.draw()
+
+        def _hit(x, y) -> int | None:
+            pt = Point(x, y)
+            for i, it in enumerate(items):
+                try:
+                    if it["geom"].contains(pt):
+                        return i
+                    # Tolerance for thin / boundary clicks
+                    if it["geom"].distance(pt) < 1e-6:
+                        return i
+                except Exception:
+                    pass
+            return None
+
+        def _on_press(event):
+            if tb_w.mode or event.inaxes != ax:
+                return
+            if event.xdata is None:
+                return
+            drag_origin[0] = (event.xdata, event.ydata, event.button)
+
+        def _on_release(event):
+            if tb_w.mode or event.inaxes != ax:
+                drag_origin[0] = None
+                return
+            if drag_origin[0] is None or event.xdata is None:
+                return
+
+            x0, y0, btn = drag_origin[0]
+            drag_origin[0] = None
+            dx = abs(event.xdata - x0)
+            dy = abs(event.ydata - y0)
+            ctrl = (event.key == "control") if hasattr(event, "key") else False
+
+            if dx < 1e-9 and dy < 1e-9:
+                # Single click
+                idx = _hit(event.xdata, event.ydata)
+                if idx is not None:
+                    if btn == 1:
+                        if not ctrl:
+                            # Clear selection unless ctrl held
+                            for it in items:
+                                it["sel"] = False
+                        items[idx]["sel"] = not items[idx]["sel"]
+                        items[idx]["excl"] = False
+                    elif btn == 3:
+                        items[idx]["excl"] = not items[idx]["excl"]
+                        items[idx]["sel"] = False
+            else:
+                # Drag → box-select
+                bx = shapely_box(min(x0, event.xdata), min(y0, event.ydata),
+                                 max(x0, event.xdata), max(y0, event.ydata))
+                if btn == 1:
+                    if not ctrl:
+                        for it in items:
+                            it["sel"] = False
+                    for it in items:
+                        if not it["excl"]:
+                            try:
+                                if bx.contains(it["geom"].centroid):
+                                    it["sel"] = True
+                            except Exception:
+                                pass
+            _full_redraw()
+
+        def _on_key_sb(event):
+            if event.key in ("ctrl+z", "z"):
+                _undo()
+
+        def _merge_selected():
+            sel = [it for it in items if it["sel"] and not it["excl"]]
+            if len(sel) < 2:
+                messagebox.showinfo("Shape Builder",
+                                    "Select at least 2 polygons to merge.")
+                return
+            history.append(_snapshot())
+            merged = unary_union([it["geom"] for it in sel])
+            new_items = [it for it in items
+                         if not (it["sel"] and not it["excl"])]
+            new_items.append({"geom": merged, "sel": False, "excl": False})
+            items.clear()
+            items.extend(new_items)
+            _full_redraw()
+
+        def _undo():
+            if history:
+                items.clear()
+                items.extend(history.pop())
+                _full_redraw()
+
+        def _toggle_all(state: bool):
+            for it in items:
+                if not it["excl"]:
+                    it["sel"] = state
+            _full_redraw()
+
+        def _reset():
+            history.clear()
+            items.clear()
+            items.extend(
+                {"geom": geom, "sel": False, "excl": False}
+                for geom in df.geometry
+                if geom is not None and not geom.is_empty
+            )
+            _full_redraw()
+
+        def _use_these():
+            active = [it["geom"] for it in items if not it["excl"]]
+            if not active:
+                messagebox.showinfo("Shape Builder", "No active polygons.")
+                return
+            self._shape_built_geoms = active
+            n   = len(active)
+            area = sum(g.area for g in active)
+            self._shape_lbl.config(
+                text=f"  {n} polygon{'s' if n != 1 else ''}  area={area:.5f}",
+                foreground=C_POLY_SEL)
+            self.statusbar.set_message(
+                f"Shape Builder: {n} polygons ready — click 'Process Global Map'")
+            top.destroy()
+
+        def _clear_override():
+            self._shape_built_geoms = None
+            self._shape_lbl.config(text="  no shape override",
+                                   foreground="#666666")
+            _full_redraw()
+
+        # Build button bar now (functions defined)
+        make_button(btn_bar, "Select All",
+                    lambda: _toggle_all(True),  "outline-success").pack(side="left", padx=2)
+        make_button(btn_bar, "Deselect All",
+                    lambda: _toggle_all(False), "outline-secondary").pack(side="left", padx=2)
+        make_button(btn_bar, "Merge Selected",
+                    _merge_selected, "warning").pack(side="left", padx=6)
+        make_button(btn_bar, "Undo Merge",
+                    _undo,          "outline-warning").pack(side="left", padx=2)
+        make_button(btn_bar, "Reset",
+                    _reset,         "danger").pack(side="left", padx=6)
+        make_button(btn_bar, "Clear Override",
+                    _clear_override, "outline-secondary").pack(side="left", padx=2)
+        make_button(btn_bar, "▶  Use These Polygons",
+                    _use_these,     "primary").pack(side="right", padx=4)
+
+        fig.canvas.mpl_connect("button_press_event",   _on_press)
+        fig.canvas.mpl_connect("button_release_event", _on_release)
+        fig.canvas.mpl_connect("key_press_event",      _on_key_sb)
+        _full_redraw()
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # HINT TOOL  (draw routing hints applied as skeleton guidance)
+    # ═════════════════════════════════════════════════════════════════════════
+
+    def _open_hint_tool(self) -> None:
+        """
+        Draw routing hint strokes on top of the map.
+
+        Hint strokes are stored as LineStrings and snapped-to during
+        centerline extraction (post-processing via shapely.snap).
+        They work in both Auto and Manual processing modes.
+
+        Interactions
+        ------------
+        Click to place vertices  ·  Double-click / Enter = commit stroke
+        Z = undo vertex  ·  Esc = cancel current stroke
+        Snap Tolerance slider controls how strongly hints pull centerlines.
+        """
+        top = tk.Toplevel(self.root)
+        top.title("〰  Draw Routing Hints")
+        top.geometry("1100x840")
+        top.resizable(True, True)
+
+        # ── mutable state ─────────────────────────────────────────────────
+        hints: list[LineString]        = list(self._hint_lines)
+        pts:   list[tuple[float,float]] = []
+        bg_cache:  list = [None]
+        rubber_ln: list = [None]
+
+        # ── canvas ────────────────────────────────────────────────────────
+        fig_bg = C_BG_DARK if BOOTSTRAP else "white"
+        fig    = Figure(figsize=(10, 7), facecolor=fig_bg)
+        ax     = fig.add_subplot(111)
+        ax.set_facecolor(C_BG_DARK if BOOTSTRAP else C_BG_LIGHT)
+
+        cv = FigureCanvasTkAgg(fig, master=top)
+        try:
+            tb_h = NavigationToolbar2Tk(cv, top, pack_toolbar=False)
+        except TypeError:
+            tb_h = NavigationToolbar2Tk(cv, top)
+        tb_h.update()
+        tb_h.pack(side="bottom", fill="x")
+
+        # ── info bar ──────────────────────────────────────────────────────
+        info = ttk.Frame(top, padding="4 3")
+        info.pack(fill="x", side="top")
+        ttk.Label(
+            info,
+            text="  Click to place hint vertices  ·  Double-click or Enter to commit  "
+                 "·  Z = undo vertex  ·  Esc = cancel stroke",
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+        cnt_lbl = ttk.Label(info, font=("Segoe UI", 9, "bold"))
+        cnt_lbl.pack(side="right", padx=8)
+
+        # ── snap-tolerance row ────────────────────────────────────────────
+        tol_row = ttk.Frame(top, padding="6 2")
+        tol_row.pack(fill="x", side="top")
+        ttk.Label(tol_row, text="Snap Tolerance:",
+                  font=("Segoe UI", 8, "bold")).pack(side="left", padx=(4, 6))
+        tol_val = ttk.Label(tol_row, text=f"{self._hint_snap_tol:.4f}")
+        tol_val.pack(side="left")
+        tol_scale = tk.Scale(
+            tol_row, from_=0.00005, to=0.002, resolution=0.00005,
+            orient="horizontal", showvalue=False, length=180,
+            command=lambda v: (
+                tol_val.config(text=f"{float(v):.5f}"),
+                self.__setattr__("_hint_snap_tol", float(v)),
+            ))
+        tol_scale.set(self._hint_snap_tol)
+        tol_scale.pack(side="left", padx=8)
+        ttk.Label(tol_row,
+                  text="(higher = centerlines pulled harder toward hints)",
+                  font=("Segoe UI", 7), foreground="#888888").pack(side="left")
+
+        # ── button bar ────────────────────────────────────────────────────
+        btn_bar = ttk.Frame(top, padding="6")
+        btn_bar.pack(fill="x", side="bottom")
+        cv.get_tk_widget().pack(fill="both", expand=True)
+
+        # ── drawing helpers ───────────────────────────────────────────────
+
+        def _full_redraw():
+            ax.clear()
+            ax.set_facecolor(C_BG_DARK if BOOTSTRAP else C_BG_LIGHT)
+            tc = "#dddddd" if BOOTSTRAP else "black"
+
+            # Background: master lines (if processed)
+            for line in self.master_lines:
+                x, y = line.xy
+                ax.plot(x, y, color=C_GLOBAL, linewidth=1.0, alpha=0.35, zorder=1)
+
+            # Existing hint strokes
+            for hl in hints:
+                x, y = hl.xy
+                ax.plot(x, y, color=C_HINT, linewidth=2.2,
+                        linestyle="--", alpha=0.90, zorder=3)
+
+            # In-progress stroke
+            if pts:
+                px = [p[0] for p in pts]
+                py = [p[1] for p in pts]
+                ax.plot(px, py, color=C_HINT, linewidth=2.2, zorder=4)
+                ax.plot(px, py, "o", color="#ffffff", markersize=6, zorder=5)
+
+            n  = len(hints)
+            st = (f"drawing… {len(pts)} point{'s' if len(pts) != 1 else ''}"
+                  if pts else "click to start a new hint stroke")
+            ax.set_title(
+                f"{n} hint stroke{'s' if n != 1 else ''}  ·  {st}  "
+                f"·  snap tol = {self._hint_snap_tol:.5f}",
+                color=tc, fontsize=9)
+            cnt_lbl.config(text=f"{n} stroke{'s' if n != 1 else ''}")
+
+            rubber_ln[0], = ax.plot(
+                [], [], color=C_HINT, linewidth=1.5,
+                linestyle=":", alpha=0.80, zorder=6)
+            cv.draw()
+            bg_cache[0] = fig.canvas.copy_from_bbox(ax.bbox)
+
+        def _rubber(x, y):
+            if bg_cache[0] is None or not pts or rubber_ln[0] is None:
+                return
+            fig.canvas.restore_region(bg_cache[0])
+            rubber_ln[0].set_data([pts[-1][0], x], [pts[-1][1], y])
+            ax.draw_artist(rubber_ln[0])
+            fig.canvas.blit(ax.bbox)
+
+        def _commit():
+            if len(pts) < 2:
+                pts.clear()
+                _full_redraw()
+                return
+            hints.append(LineString(list(pts)))
+            pts.clear()
+            _full_redraw()
+
+        def _on_click(event):
+            if tb_h.mode or event.inaxes != ax:
+                return
+            if event.xdata is None:
+                return
+            if event.dblclick:
+                _commit()
+            else:
+                pts.append((event.xdata, event.ydata))
+                _full_redraw()
+
+        def _on_move(event):
+            if event.inaxes != ax or not pts:
+                return
+            if event.xdata is None:
+                return
+            _rubber(event.xdata, event.ydata)
+
+        def _on_key_h(event):
+            k = event.key
+            if k == "enter" and len(pts) >= 2:
+                _commit()
+            elif k in ("z", "ctrl+z") and pts:
+                pts.pop()
+                _full_redraw()
+            elif k == "escape":
+                pts.clear()
+                _full_redraw()
+
+        def _undo_stroke():
+            if hints:
+                hints.pop()
+                _full_redraw()
+
+        def _clear_hints():
+            hints.clear()
+            pts.clear()
+            _full_redraw()
+
+        def _apply_close():
+            self._hint_lines = list(hints)
+            n = len(hints)
+            if n:
+                self._hint_lbl.config(
+                    text=f"  {n} hint stroke{'s' if n != 1 else ''}  "
+                         f"tol={self._hint_snap_tol:.5f}",
+                    foreground=C_HINT)
+            else:
+                self._hint_lbl.config(text="  no hints",
+                                      foreground="#666666")
+            self._redraw_map()
+            top.destroy()
+
+        # Build button bar (functions defined above)
+        make_button(btn_bar, "Undo Last Stroke",
+                    _undo_stroke, "warning").pack(side="left", padx=4)
+        make_button(btn_bar, "Clear All Hints",
+                    _clear_hints, "danger").pack(side="left", padx=4)
+        make_button(btn_bar, "Apply & Close",
+                    _apply_close, "primary").pack(side="right", padx=4)
+
+        fig.canvas.mpl_connect("button_press_event",  _on_click)
+        fig.canvas.mpl_connect("motion_notify_event", _on_move)
+        fig.canvas.mpl_connect("key_press_event",     _on_key_h)
+        _full_redraw()
 
     # ═════════════════════════════════════════════════════════════════════════
     # PENCIL TOOL  (hand-drawn line completion)

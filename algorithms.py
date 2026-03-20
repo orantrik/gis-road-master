@@ -150,6 +150,43 @@ def process_single(geom, prune: float, straight: float, smooth: int):
 # SEGMENT-AWARE BATCH PROCESSING
 # ─────────────────────────────────────────────────────────────────────────────
 
+def apply_hints(
+    lines: list[LineString],
+    hint_lines: list[LineString],
+    snap_tol: float = 0.0002,
+) -> list[LineString]:
+    """
+    Snap extracted centerlines toward user-drawn routing hint strokes.
+
+    For each centerline that passes within 5 × snap_tol of any hint,
+    shapely.ops.snap() pulls its vertices toward the nearest point on
+    the combined hint geometry.  Lines farther away are returned unchanged,
+    so hints only affect the areas where they were drawn.
+
+    Parameters
+    ----------
+    lines      : extracted centerline segments
+    hint_lines : user-drawn stroke geometries (any CRS, must match lines)
+    snap_tol   : snapping tolerance in the layer's CRS units
+    """
+    if not hint_lines or not lines:
+        return lines
+    valid = [h for h in hint_lines if h is not None and not h.is_empty]
+    if not valid:
+        return lines
+    hint_geom = unary_union(valid)
+    result: list[LineString] = []
+    for line in lines:
+        if line is None or line.is_empty:
+            continue
+        # Pre-filter: only bother snapping if hint is nearby
+        if line.distance(hint_geom) <= snap_tol * 5:
+            result.append(snap(line, hint_geom, snap_tol))
+        else:
+            result.append(line)
+    return result
+
+
 def process_segments(
     gdf: gpd.GeoDataFrame,
     use_auto: bool = True,
@@ -158,6 +195,8 @@ def process_segments(
     manual_smooth: int = 2,
     min_area: float = 0.0,
     progress_cb=None,
+    hint_lines: list[LineString] | None = None,
+    hint_snap_tol: float = 0.0002,
 ) -> list[LineString]:
     """
     Process each road polygon individually (segment-aware).
@@ -210,6 +249,10 @@ def process_segments(
             results.extend(g for g in line.geoms if not g.is_empty)
         elif not line.is_empty:
             results.append(line)
+
+    # Apply routing hints as a post-processing snap step
+    if hint_lines:
+        results = apply_hints(results, hint_lines, hint_snap_tol)
 
     return results
 
