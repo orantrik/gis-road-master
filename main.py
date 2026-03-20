@@ -131,6 +131,21 @@ class GISRoadMaster:
         self._build_left()
         self._build_canvas()
 
+    # ── scroll helper ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _bind_scroll_to_canvas(widget, canvas: tk.Canvas) -> None:
+        """
+        Recursively bind <MouseWheel> on *widget* and all its descendants
+        so that hovering over any child control scrolls the enclosing canvas.
+        """
+        def _scroll(event):
+            canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+        widget.bind("<MouseWheel>", _scroll, add="+")
+        for child in widget.winfo_children():
+            GISRoadMaster._bind_scroll_to_canvas(child, canvas)
+
     # ── left sidebar ──────────────────────────────────────────────────────────
 
     def _build_left(self) -> None:
@@ -156,6 +171,29 @@ class GISRoadMaster:
 
     def _build_actions_tab(self, parent, pad) -> None:
         """File loader + Processing Parameters + Workflow action buttons."""
+
+        # ── Scrollable wrapper ────────────────────────────────────────────
+        _canvas = tk.Canvas(parent, highlightthickness=0)
+        _sb = ttk.Scrollbar(parent, orient="vertical", command=_canvas.yview)
+        _inner = ttk.Frame(_canvas)
+
+        _inner.bind(
+            "<Configure>",
+            lambda _e: _canvas.configure(scrollregion=_canvas.bbox("all")))
+        _canvas.create_window((0, 0), window=_inner, anchor="nw")
+        _canvas.configure(yscrollcommand=_sb.set)
+
+        _sb.pack(side="right", fill="y")
+        _canvas.pack(side="left", fill="both", expand=True)
+
+        def _on_wheel(event):
+            _canvas.yview_scroll(-1 * (event.delta // 120), "units")
+
+        _canvas.bind("<MouseWheel>", _on_wheel)
+        _inner.bind("<MouseWheel>", _on_wheel)
+
+        # Redirect parent → scrollable inner frame for all content below
+        parent = _inner  # noqa: PLW0621
 
         # ── File section ─────────────────────────────────────────────────
         file_frame = ttk.LabelFrame(parent, text=" Data Source ", padding="6")
@@ -246,6 +284,9 @@ class GISRoadMaster:
         ttk.Separator(act_frame).pack(fill="x", pady=4)
         make_button(act_frame, "EXPORT FINAL GeoJSON",
                     self._export, "secondary").pack(fill="x", pady=2)
+
+        # After all widgets exist, bind wheel scroll on every descendant
+        self._bind_scroll_to_canvas(_inner, _canvas)
 
     def _build_filters_tab(self, parent, pad) -> None:
         """Plan and Road-Type filter checklists with Select All / None."""
