@@ -162,8 +162,8 @@ class GISRoadMaster:
         param_frame = ttk.LabelFrame(lf, text=" Processing Parameters ", padding="6")
         param_frame.pack(fill="x", side="bottom", **pad)
 
-        # Auto-tune toggle
-        self._auto_var = tk.BooleanVar(value=True)
+        # Auto-tune toggle – OFF by default so manual sliders are active
+        self._auto_var = tk.BooleanVar(value=False)
         cb_kw: dict = {
             "text": "Auto-Tune per segment",
             "variable": self._auto_var,
@@ -174,7 +174,7 @@ class GISRoadMaster:
         ttk.Checkbutton(param_frame, **cb_kw).pack(anchor="w", pady=(0, 6))
 
         self._s_prune    = SliderRow(param_frame, "Pruning",
-                                     0.0,    1.0,    0.15,   0.005,   "{:.3f}")
+                                     0.0,    1.0,    0.10,   0.005,   "{:.3f}")
         self._s_straight = SliderRow(param_frame, "Straighten",
                                      0.0,    0.0002, 0.00002, 0.000002, "{:.6f}")
         self._s_smooth   = SliderRow(param_frame, "Smoothing",
