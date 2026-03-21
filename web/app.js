@@ -1481,3 +1481,108 @@ window.addEventListener('resize', () => {
     pencilRedraw();
   }
 });
+
+// ═══════════════════════════════════════════════════════════════
+// MAP ZOOM / PAN
+// ═══════════════════════════════════════════════════════════════
+
+async function _zoomRequest(action, extra = {}) {
+  if (!state.fileLoaded) return;
+  const rect = document.getElementById('map-container').getBoundingClientRect();
+  const r = await api('/api/map_zoom', {
+    action,
+    width:  Math.floor(rect.width)  || 800,
+    height: Math.floor(rect.height) || 600,
+    ...extra,
+  });
+  if (r.image) setMapImage(r.image, r.extent);
+}
+
+function mapZoom(action, cx, cy) {
+  const extra = (cx !== undefined && cy !== undefined) ? { cx, cy } : {};
+  _zoomRequest(action, extra);
+}
+
+async function mapResetView() {
+  if (!state.fileLoaded) return;
+  const rect = document.getElementById('map-container').getBoundingClientRect();
+  const r = await api('/api/map_reset_view', {
+    width:  Math.floor(rect.width)  || 800,
+    height: Math.floor(rect.height) || 600,
+  });
+  if (r.image) setMapImage(r.image, r.extent);
+}
+
+// ── Mouse-wheel zoom (scroll over map) ───────────────────────────
+(function () {
+  const container = document.getElementById('map-container');
+
+  container.addEventListener('wheel', (e) => {
+    if (!state.fileLoaded || !state.mapExtent) return;
+    e.preventDefault();
+
+    const img  = document.getElementById('map-img');
+    const rect = img.getBoundingClientRect();
+    const px   = e.clientX - rect.left;
+    const py   = e.clientY - rect.top;
+    const [cx, cy] = pxToGIS(px, py, rect.width, rect.height);
+
+    const action = e.deltaY < 0 ? 'zoom_in' : 'zoom_out';
+    mapZoom(action, cx, cy);
+  }, { passive: false });
+
+  // ── Drag-to-pan ─────────────────────────────────────────────
+  let _pan = null;  // { startX, startY, extentAtStart }
+
+  container.addEventListener('mousedown', (e) => {
+    // Only pan with middle button or when box-draw mode is off
+    if (!state.fileLoaded || !state.mapExtent) return;
+    const overlay = document.getElementById('draw-overlay');
+    if (overlay.style.display !== 'none') return; // box-draw mode active
+    if (e.button !== 1 && e.button !== 0) return;  // left or middle drag
+    if (e.button === 0 && e.target.tagName === 'BUTTON') return;
+
+    const img  = document.getElementById('map-img');
+    if (!img || img.style.display === 'none') return;
+    const rect = img.getBoundingClientRect();
+
+    _pan = {
+      startX: e.clientX,
+      startY: e.clientY,
+      extent: [...state.mapExtent],
+      rectW:  rect.width,
+      rectH:  rect.height,
+    };
+    container.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+
+  window.addEventListener('mousemove', (e) => {
+    if (!_pan) return;
+    const [xmin, ymin, xmax, ymax] = _pan.extent;
+    const gisW = xmax - xmin;
+    const gisH = ymax - ymin;
+    const dx = -((e.clientX - _pan.startX) / _pan.rectW) * gisW;
+    const dy =  ((e.clientY - _pan.startY) / _pan.rectH) * gisH;
+    // Live-preview: just shift the image so panning feels instant
+    const img = document.getElementById('map-img');
+    img.style.transform =
+      `translate(${e.clientX - _pan.startX}px, ${e.clientY - _pan.startY}px)`;
+  });
+
+  window.addEventListener('mouseup', async (e) => {
+    if (!_pan) return;
+    const [xmin, ymin, xmax, ymax] = _pan.extent;
+    const gisW = xmax - xmin;
+    const gisH = ymax - ymin;
+    const dx = -((e.clientX - _pan.startX) / _pan.rectW) * gisW;
+    const dy =  ((e.clientY - _pan.startY) / _pan.rectH) * gisH;
+    _pan = null;
+    container.style.cursor = '';
+    const img = document.getElementById('map-img');
+    img.style.transform = '';
+
+    if (Math.abs(dx) < 1e-10 && Math.abs(dy) < 1e-10) return; // no movement
+    await _zoomRequest('pan', { dx, dy });
+  });
+})();

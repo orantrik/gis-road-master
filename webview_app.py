@@ -60,6 +60,7 @@ _state: dict = {
     "eraser_history":   [],     # undo stack for eraser
     # Map
     "last_extent":      None,   # [xmin, ymin, xmax, ymax]
+    "view_extent":      None,   # user-set zoom/pan window [xmin,ymin,xmax,ymax] or None=auto
 }
 
 
@@ -105,6 +106,13 @@ def _render_map(width: int, height: int,
         from geopandas import GeoSeries
         GeoSeries([box.boundary]).plot(ax=ax, color="#e74c3c",
                                        linewidth=2.0, linestyle="--", alpha=0.9)
+
+    # Apply user zoom/pan window before capturing extent
+    with _lock:
+        view = _state.get("view_extent")
+    if view:
+        ax.set_xlim(view[0], view[2])
+        ax.set_ylim(view[1], view[3])
 
     extent = _get_extent(ax)
 
@@ -227,6 +235,61 @@ def api_map_image():
     return jsonify(image=img, extent=extent)
 
 
+@app.route("/api/map_zoom", methods=["POST"])
+def api_map_zoom():
+    """
+    Zoom/pan the map view.
+    Body: { action: "zoom_in"|"zoom_out"|"pan"|"reset",
+            cx, cy,          # zoom centre in GIS coords (for zoom actions)
+            dx, dy }         # pan delta in GIS units (for pan action)
+    """
+    body = request.get_json(force=True) or {}
+    action = body.get("action", "zoom_in")
+    w = int(body.get("width", 900))
+    h = int(body.get("height", 600))
+
+    with _lock:
+        current = list(_state.get("view_extent") or _state.get("last_extent") or [0,0,1,1])
+
+    xmin, ymin, xmax, ymax = current
+    cx = float(body.get("cx", (xmin + xmax) / 2))
+    cy = float(body.get("cy", (ymin + ymax) / 2))
+    dx = float(body.get("dx", 0))
+    dy = float(body.get("dy", 0))
+
+    if action == "zoom_in":
+        factor = 0.65
+        hw = (xmax - xmin) * factor / 2
+        hh = (ymax - ymin) * factor / 2
+        new_ext = [cx - hw, cy - hh, cx + hw, cy + hh]
+    elif action == "zoom_out":
+        factor = 1.5
+        hw = (xmax - xmin) * factor / 2
+        hh = (ymax - ymin) * factor / 2
+        new_ext = [cx - hw, cy - hh, cx + hw, cy + hh]
+    elif action == "pan":
+        new_ext = [xmin + dx, ymin + dy, xmax + dx, ymax + dy]
+    else:  # reset
+        new_ext = None
+
+    with _lock:
+        _state["view_extent"] = new_ext
+
+    img, extent = _render_map(w, h)
+    return jsonify(image=img, extent=extent)
+
+
+@app.route("/api/map_reset_view", methods=["POST"])
+def api_map_reset_view():
+    with _lock:
+        _state["view_extent"] = None
+    body = request.get_json(force=True) or {}
+    w = int(body.get("width", 900))
+    h = int(body.get("height", 600))
+    img, extent = _render_map(w, h)
+    return jsonify(image=img, extent=extent)
+
+
 @app.route("/api/process", methods=["POST"])
 def api_process():
     with _lock:
@@ -270,13 +333,13 @@ def api_process():
         try:
             result = process_segments(
                 filtered,
-                manual_algo=manual,
+                manual_algorithm=manual,
                 hint_lines=hints if hints else None,
                 hint_snap_tol=snap_tol,
             )
         except TypeError:
             # Older algorithms.py without hint_lines parameter
-            result = process_segments(filtered, manual_algo=manual)
+            result = process_segments(filtered, manual_algorithm=manual)
 
         lines, report = result if isinstance(result, tuple) else (result, [])
 
