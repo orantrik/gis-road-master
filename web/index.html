@@ -17,7 +17,7 @@
       <path d="M7 7l2 2m6 6l2 2M7 17l2-2m6-6l2-2" stroke="var(--accent2)" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/>
     </svg>
     <span class="app-name">GIS <strong>ROAD MASTER</strong></span>
-    <span class="version-badge">v1.0</span>
+    <span class="version-badge">v2.0</span>
   </div>
   <div class="titlebar-center" id="titlebar-status">
     <span class="status-dot" id="status-dot"></span>
@@ -86,7 +86,7 @@
         <div class="panel-body" id="filters-body">
           <div class="filter-group">
             <div class="filter-group-label">
-              Plans
+              Plans (pl_number)
               <div class="filter-actions">
                 <button class="micro-btn" onclick="selectAll('plans-list')">All</button>
                 <button class="micro-btn" onclick="selectNone('plans-list')">None</button>
@@ -96,7 +96,7 @@
           </div>
           <div class="filter-group" style="margin-top:10px">
             <div class="filter-group-label">
-              Road Types
+              Road Types (mavat_name)
               <div class="filter-actions">
                 <button class="micro-btn" onclick="selectAll('types-list')">All</button>
                 <button class="micro-btn" onclick="selectNone('types-list')">None</button>
@@ -120,7 +120,14 @@
           </svg>
         </div>
         <div class="panel-body" id="algo-body">
-          <div class="field">
+          <div class="toggle-row" style="margin-bottom:8px">
+            <label class="toggle-label">Auto-Tune</label>
+            <label class="toggle-switch">
+              <input type="checkbox" id="auto-tune" onchange="onAutoTuneChange()" />
+              <span class="toggle-thumb"></span>
+            </label>
+          </div>
+          <div class="field" id="algo-select-field">
             <label class="field-label">Method</label>
             <div class="select-wrap">
               <select id="algo-select">
@@ -136,6 +143,94 @@
             </div>
           </div>
           <div id="method-report" class="method-report" style="display:none"></div>
+        </div>
+      </section>
+
+      <!-- Workflow -->
+      <section class="panel" id="panel-workflow" style="display:none">
+        <div class="panel-header collapsible" data-target="workflow-body">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path d="M2 4h4v4H2zM10 4h4v4h-4zM6 8h4M8 2v2M8 12v2M4 12h8" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Workflow
+          <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" fill="none">
+            <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="panel-body" id="workflow-body">
+
+          <!-- Step 1: PREPARE -->
+          <div class="workflow-step-label">① PREPARE</div>
+          <button class="btn btn-secondary btn-full wf-btn" id="btn-shape-builder" disabled>
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+              <polygon points="8,2 14,6 14,10 8,14 2,10 2,6" stroke="currentColor" stroke-width="1.5" fill="none"/>
+            </svg>
+            Shape Builder
+          </button>
+          <div class="status-label" id="shape-status">no shape override</div>
+
+          <button class="btn btn-secondary btn-full wf-btn" id="btn-hint-tool" disabled>
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+              <path d="M2 14 Q4 8 8 6 Q12 4 14 2" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="3 2"/>
+            </svg>
+            Routing Hints
+          </button>
+          <div class="status-label" id="hint-status">0 hint strokes</div>
+
+          <!-- Step 2: PROCESS -->
+          <div class="workflow-step-label" style="margin-top:8px">② PROCESS</div>
+          <button class="btn btn-primary btn-full wf-btn btn-process" id="btn-process" disabled>
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+              <polygon points="3,2 13,8 3,14" fill="currentColor"/>
+            </svg>
+            Process Global Map
+          </button>
+
+          <!-- Step 3: REFINE -->
+          <div class="workflow-step-label" style="margin-top:8px">③ REFINE</div>
+          <button class="btn btn-secondary btn-full wf-btn" id="btn-draw-box" disabled>
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+              <rect x="3" y="3" width="10" height="10" stroke="currentColor" stroke-width="1.5" stroke-dasharray="3 2"/>
+            </svg>
+            Draw Edit Box
+          </button>
+          <div class="status-label" id="box-status">no box set</div>
+
+          <button class="btn btn-secondary btn-full wf-btn" id="btn-precision-editor" disabled>
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+              <path d="M2 14l3-3 7-7 2 2-7 7-3 1z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M10 4l2 2" stroke="currentColor" stroke-width="1.3"/>
+            </svg>
+            Open Precision Editor
+          </button>
+
+          <button class="btn btn-secondary btn-full wf-btn" id="btn-precision-apply" disabled>
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+              <path d="M3 8h8M8 5l3 3-3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+              <circle cx="13" cy="8" r="1.5" fill="currentColor"/>
+            </svg>
+            Apply Edits to Global Map
+          </button>
+
+          <!-- Step 4: DRAW -->
+          <div class="workflow-step-label" style="margin-top:8px">④ DRAW</div>
+          <button class="btn btn-secondary btn-full wf-btn" id="btn-pencil-tool" disabled>
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+              <path d="M3 13l2-5 6-6 3 3-6 6-5 2z" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M10 2l4 4" stroke="currentColor" stroke-width="1.3"/>
+            </svg>
+            Pencil Tool
+          </button>
+
+          <!-- Export -->
+          <div class="workflow-step-label" style="margin-top:8px">EXPORT</div>
+          <button class="btn btn-secondary btn-full wf-btn" id="btn-export-geojson" disabled>
+            Export GeoJSON
+          </button>
+          <button class="btn btn-secondary btn-full wf-btn" id="btn-export-shp" disabled>
+            Export .shp / .gpkg
+          </button>
+
         </div>
       </section>
 
@@ -162,6 +257,8 @@
       </div>
       <!-- Map image -->
       <img id="map-img" src="" alt="Map" style="display:none" />
+      <!-- Box drawing overlay canvas -->
+      <canvas id="draw-overlay" style="display:none"></canvas>
       <!-- Loading spinner overlay -->
       <div class="map-spinner" id="map-spinner" style="display:none">
         <div class="spinner-ring"></div>
@@ -194,16 +291,20 @@
   <aside class="controls">
     <div class="controls-inner">
 
-      <!-- Processing -->
+      <!-- Processing Parameters -->
       <section class="panel">
-        <div class="panel-header">
+        <div class="panel-header collapsible" data-target="processing-body">
           <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
             <path d="M3 8h2l2-4 2 8 2-4 2 4h2" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
           </svg>
           Processing
+          <svg class="chevron" viewBox="0 0 10 6" fill="none">
+            <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
         </div>
-        <div class="panel-body">
-          <div class="slider-row" id="ctrl-smooth">
+        <div class="panel-body" id="processing-body">
+
+          <div class="slider-row">
             <div class="slider-header">
               <label>Smoothing</label>
               <span class="slider-val" id="val-smooth">0</span>
@@ -228,11 +329,11 @@
           <div class="slider-row">
             <div class="slider-header">
               <label>Dead-end Pruning</label>
-              <span class="slider-val" id="val-prune">0.0000</span>
+              <span class="slider-val" id="val-deadend">0.0000</span>
             </div>
             <div class="slider-track-wrap">
               <input type="range" min="0" max="0.02" step="0.0002" value="0"
-                     id="s-prune" oninput="syncSlider(this,'val-prune',4)" />
+                     id="s-deadend" oninput="syncSlider(this,'val-deadend',4)" />
             </div>
           </div>
 
@@ -247,27 +348,28 @@
             </div>
           </div>
 
-          <button class="btn btn-primary btn-full btn-process" id="btn-process" disabled>
-            <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
-              <polygon points="3,2 13,8 3,14" fill="currentColor"/>
-            </svg>
-            Process Centerlines
-          </button>
-        </div>
-      </section>
+          <div class="slider-row">
+            <div class="slider-header">
+              <label>Pruning</label>
+              <span class="slider-val" id="val-prune">0.000</span>
+            </div>
+            <div class="slider-track-wrap">
+              <input type="range" min="0" max="1.0" step="0.005" value="0"
+                     id="s-prune" oninput="syncSlider(this,'val-prune',3)" />
+            </div>
+          </div>
 
-      <!-- Export Shapefile -->
-      <section class="panel">
-        <div class="panel-header">
-          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
-            <path d="M8 2v8m-3-3l3 3 3-3M3 13h10" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-          Export Shapefile
-        </div>
-        <div class="panel-body">
-          <button class="btn btn-secondary btn-full" id="btn-export-shp" disabled>
-            Export .shp / .gpkg
-          </button>
+          <div class="slider-row">
+            <div class="slider-header">
+              <label>Straighten</label>
+              <span class="slider-val" id="val-straight">0.000000</span>
+            </div>
+            <div class="slider-track-wrap">
+              <input type="range" min="0" max="0.0002" step="0.000002" value="0"
+                     id="s-straight" oninput="syncSlider(this,'val-straight',6)" />
+            </div>
+          </div>
+
         </div>
       </section>
 
@@ -337,6 +439,124 @@
 
 <!-- ══ TOAST NOTIFICATIONS ════════════════════════════════════════════ -->
 <div class="toast-container" id="toast-container"></div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<!-- MODAL: Shape Builder                                               -->
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<div class="modal" id="modal-shape-builder" style="display:none">
+  <div class="modal-header">
+    <span class="modal-title">
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+        <polygon points="8,2 14,6 14,10 8,14 2,10 2,6" stroke="var(--accent)" stroke-width="1.5" fill="none"/>
+      </svg>
+      Shape Builder
+    </span>
+    <div class="modal-header-actions">
+      <span class="modal-status" id="shape-builder-status">Loading…</span>
+      <button class="modal-close-btn" onclick="closeModal('modal-shape-builder')">✕</button>
+    </div>
+  </div>
+  <div class="modal-toolbar">
+    <button class="btn btn-secondary" onclick="shapeSelectAll()">Select All</button>
+    <button class="btn btn-secondary" onclick="shapeDeselectAll()">Deselect All</button>
+    <button class="btn btn-secondary" onclick="shapeMergeSelected()">Merge Selected</button>
+    <button class="btn btn-secondary" onclick="shapeUndo()">Undo Merge</button>
+    <button class="btn btn-secondary" onclick="shapeReset()">Reset</button>
+    <button class="btn btn-secondary" onclick="shapeClearOverride()">Clear Override</button>
+    <button class="btn btn-primary" onclick="shapeUsePolygons()">▶ Use These Polygons</button>
+  </div>
+  <div class="modal-canvas-wrap">
+    <canvas id="shape-canvas"></canvas>
+    <div class="canvas-hint">Left-click: select/deselect · Right-click: exclude/restore · Drag: box-select</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<!-- MODAL: Routing Hints                                               -->
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<div class="modal" id="modal-hint-tool" style="display:none">
+  <div class="modal-header">
+    <span class="modal-title">
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+        <path d="M2 14 Q4 8 8 6 Q12 4 14 2" stroke="#c678dd" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="3 2"/>
+      </svg>
+      Routing Hints
+    </span>
+    <div class="modal-header-actions">
+      <span class="modal-status" id="hint-tool-status">0 hints</span>
+      <button class="modal-close-btn" onclick="closeModal('modal-hint-tool')">✕</button>
+    </div>
+  </div>
+  <div class="modal-toolbar">
+    <div class="modal-slider-group">
+      <label>Snap Tolerance</label>
+      <input type="range" min="0.00005" max="0.002" step="0.00005" value="0.0003"
+             id="hint-snap-tol" oninput="onHintTolChange(this)" style="width:120px"/>
+      <span class="slider-val" id="val-hint-tol">0.000300</span>
+    </div>
+    <button class="btn btn-secondary" onclick="hintClearLast()">Clear Last Hint</button>
+    <button class="btn btn-secondary" onclick="hintClearAll()">Clear All Hints</button>
+    <button class="btn btn-primary" onclick="hintSaveClose()">Save &amp; Close</button>
+  </div>
+  <div class="modal-canvas-wrap">
+    <canvas id="hint-canvas"></canvas>
+    <div class="canvas-hint">Click: place vertex · Double-click or Enter: commit stroke · Z: undo vertex · Esc: cancel</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<!-- MODAL: Precision Editor                                            -->
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<div class="modal" id="modal-precision" style="display:none">
+  <div class="modal-header">
+    <span class="modal-title">
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+        <path d="M2 14l3-3 7-7 2 2-7 7-3 1z" stroke="var(--success)" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      Precision Editor
+    </span>
+    <div class="modal-header-actions">
+      <span class="modal-status" id="precision-status">Loading…</span>
+      <button class="modal-close-btn" onclick="closeModal('modal-precision')">✕</button>
+    </div>
+  </div>
+  <div class="modal-toolbar">
+    <button class="btn btn-secondary" onclick="precisionUndo()">Ctrl+Z Undo</button>
+    <button class="btn btn-primary" onclick="precisionApply()">Apply to Global Map</button>
+  </div>
+  <div class="modal-canvas-wrap">
+    <canvas id="precision-canvas"></canvas>
+    <div class="canvas-hint">Click a green line to erase it · Ctrl+Z to undo</div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<!-- MODAL: Pencil Tool                                                 -->
+<!-- ══════════════════════════════════════════════════════════════════ -->
+<div class="modal" id="modal-pencil" style="display:none">
+  <div class="modal-header">
+    <span class="modal-title">
+      <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+        <path d="M3 13l2-5 6-6 3 3-6 6-5 2z" stroke="var(--accent)" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      Pencil Tool
+    </span>
+    <div class="modal-header-actions">
+      <span class="modal-status" id="pencil-status">0 lines</span>
+      <button class="modal-close-btn" onclick="closeModal('modal-pencil')">✕</button>
+    </div>
+  </div>
+  <div class="modal-toolbar">
+    <button class="btn btn-secondary" onclick="pencilUndo()">Z - Undo Vertex</button>
+    <button class="btn btn-secondary" onclick="pencilCancelLine()">Esc - Cancel</button>
+    <button class="btn btn-secondary" onclick="pencilClearAll()">Clear All</button>
+    <button class="btn btn-primary" onclick="pencilAddToMap()">Add to Map</button>
+  </div>
+  <div class="modal-canvas-wrap">
+    <canvas id="pencil-canvas"></canvas>
+    <div class="canvas-hint">Click: place vertex · Double-click: commit line · Z: undo vertex · Esc: cancel current line</div>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

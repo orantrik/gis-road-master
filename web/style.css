@@ -28,13 +28,16 @@
   --danger:         #ff3d71;
   --danger-dim:     rgba(255, 61, 113, 0.15);
 
+  --hint-color:     #c678dd;
+  --hint-glow:      rgba(198, 120, 221, 0.25);
+
   --text:           #94a3b8;
   --text-dim:       #3d5068;
   --text-bright:    #e2e8f0;
   --text-accent:    #00d4ff;
 
   --titlebar-h:     44px;
-  --sidebar-w:      224px;
+  --sidebar-w:      230px;
   --controls-w:     264px;
   --statusbar-h:    28px;
 
@@ -487,6 +490,19 @@ body {
   object-fit: contain;
 }
 
+/* Draw overlay canvas */
+#draw-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: all;
+  z-index: 20;
+}
+#draw-overlay.box-mode {
+  cursor: crosshair;
+}
+
 /* Map loading spinner */
 .map-spinner {
   position: absolute;
@@ -586,7 +602,7 @@ body {
   border: 1px solid rgba(0,212,255,0.2);
   border-radius: 4px;
   padding: 1px 6px;
-  min-width: 48px;
+  min-width: 60px;
   text-align: center;
 }
 
@@ -781,8 +797,7 @@ input[type="range"]::-webkit-slider-thumb:hover {
 
 /* Process button — special */
 .btn-process {
-  margin-top: 14px;
-  padding: 10px 14px;
+  padding: 9px 14px;
   background: linear-gradient(135deg, rgba(0,212,255,0.22), rgba(124,58,237,0.15));
   border-color: rgba(0,212,255,0.4);
   color: var(--text-bright);
@@ -802,6 +817,40 @@ input[type="range"]::-webkit-slider-thumb:hover {
   border-color: var(--accent);
   box-shadow: 0 0 30px rgba(0,212,255,0.2), 0 0 60px rgba(124,58,237,0.1);
 }
+
+/* ══ WORKFLOW PANEL ═════════════════════════════════════════════ */
+.workflow-step-label {
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  margin: 6px 0 4px;
+  padding: 2px 4px;
+  border-left: 2px solid var(--accent);
+  background: var(--accent-dim);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.wf-btn {
+  margin-bottom: 3px;
+  font-size: 11.5px;
+  padding: 6px 10px;
+}
+
+/* Status labels below workflow buttons */
+.status-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin: 0 4px 6px;
+  font-style: italic;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.status-label.active   { color: var(--success); font-style: normal; font-weight: 600; }
+.status-label.hint-set { color: var(--hint-color); font-style: normal; }
+.status-label.box-set  { color: var(--warning); font-style: normal; font-weight: 600; }
 
 /* ══ STATUS BAR ═════════════════════════════════════════════════ */
 .statusbar {
@@ -890,6 +939,153 @@ input[type="range"]::-webkit-slider-thumb:hover {
   from { opacity: 1; transform: translateX(0); }
   to   { opacity: 0; transform: translateX(20px); }
 }
+
+/* ══ MODALS ═════════════════════════════════════════════════════ */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  background: rgba(4, 6, 14, 0.97);
+  display: flex;
+  flex-direction: column;
+  backdrop-filter: blur(6px);
+  animation: modal-in 0.2s var(--ease);
+}
+
+@keyframes modal-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.modal-header {
+  height: 48px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  flex-shrink: 0;
+  box-shadow: 0 2px 20px rgba(0,0,0,0.4);
+}
+
+.modal-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-bright);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.modal-status {
+  font-size: 11px;
+  color: var(--accent);
+  font-family: 'Consolas', monospace;
+  background: var(--accent-dim);
+  border: 1px solid rgba(0,212,255,0.2);
+  border-radius: 4px;
+  padding: 2px 8px;
+}
+
+.modal-close-btn {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 13px;
+  transition: var(--t-fast);
+}
+.modal-close-btn:hover {
+  background: var(--danger-dim);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.modal-toolbar {
+  height: 44px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 14px;
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+
+.modal-toolbar .btn {
+  padding: 5px 12px;
+  font-size: 11.5px;
+  flex-shrink: 0;
+}
+
+.modal-slider-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.modal-slider-group label {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.modal-slider-group .slider-val {
+  min-width: 70px;
+}
+
+.modal-canvas-wrap {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-canvas-wrap canvas {
+  flex: 1;
+  width: 100%;
+  display: block;
+}
+
+.canvas-hint {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(6, 9, 18, 0.85);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 5px 14px;
+  font-size: 11px;
+  color: var(--text-dim);
+  pointer-events: none;
+  white-space: nowrap;
+  backdrop-filter: blur(4px);
+}
+
+/* Shape builder cursor states */
+#shape-canvas      { cursor: pointer; }
+#hint-canvas       { cursor: crosshair; }
+#precision-canvas  { cursor: pointer; }
+#pencil-canvas     { cursor: crosshair; }
 
 /* ══ UTILITIES ══════════════════════════════════════════════════ */
 .glow-accent { filter: drop-shadow(0 0 6px var(--accent-glow)); }
