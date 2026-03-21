@@ -17,7 +17,7 @@ import os
 import queue
 import threading
 import tkinter as tk
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, simpledialog
 
 import geopandas as gpd
 import numpy as np
@@ -41,6 +41,7 @@ except ImportError:
 from algorithms import (
     apply_smoothing,
     chaikins_corner_cutting,
+    cut_intersections,
     export_geojson,
     lines_to_gdf,
     METHOD_LABELS,
@@ -71,6 +72,91 @@ C_POLY_SEL    = "#e67e22"   # orange   – selected polygon
 C_POLY_EXC    = "#922b21"   # red      – excluded polygon
 C_BG_DARK     = "#16213e"
 C_BG_LIGHT    = "#f4f4f4"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FBX EXPORT OPTIONS DIALOG
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _FBXExportDialog(tk.Toplevel):
+    """Single dialog for all FBX export options."""
+
+    _DEFAULT_BP   = "/Game/Road_Creator_Pro/Blueprints/BP_Road_Creator"
+    _DEFAULT_SCALE = "100000"
+
+    def __init__(self, parent: tk.Misc) -> None:
+        super().__init__(parent)
+        self.title("Export FBX – Unreal Options")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.result: tuple | None = None
+
+        pad = {"padx": 12, "pady": 4}
+
+        # ── Blueprint path ─────────────────────────────────────────────
+        ttk.Label(self, text="Blueprint Content Browser path:").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=12, pady=(12, 2))
+        self._bp_var = tk.StringVar(value=self._DEFAULT_BP)
+        ttk.Entry(self, textvariable=self._bp_var, width=52).grid(
+            row=1, column=0, columnspan=2, sticky="ew", **pad)
+        ttk.Label(
+            self,
+            text="e.g. /Game/Road_Creator_Pro/Blueprints/BP_Road_Creator\n"
+                 "You can also paste a .uasset file-system path and it will\n"
+                 "be converted automatically.",
+            foreground="grey",
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 8))
+
+        # ── Scale ──────────────────────────────────────────────────────
+        ttk.Label(self, text="Scale  (GIS units → Unreal cm):").grid(
+            row=3, column=0, sticky="w", padx=12, pady=(4, 2))
+        self._scale_var = tk.StringVar(value=self._DEFAULT_SCALE)
+        ttk.Entry(self, textvariable=self._scale_var, width=20).grid(
+            row=4, column=0, sticky="w", **pad)
+        ttk.Label(
+            self,
+            text="1 degree ≈ 11 100 000 cm\n1 metre   ≈ 100 cm",
+            foreground="grey",
+            justify="left",
+        ).grid(row=4, column=1, sticky="w", padx=(0, 12))
+
+        # ── Merge checkbox ─────────────────────────────────────────────
+        ttk.Separator(self).grid(row=5, column=0, columnspan=2,
+                                 sticky="ew", padx=12, pady=8)
+        self._merge_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            self,
+            text="Merge all roads into one spline  (single actor in Unreal)",
+            variable=self._merge_var,
+        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=12, pady=(0, 12))
+
+        # ── Buttons ────────────────────────────────────────────────────
+        ttk.Separator(self).grid(row=7, column=0, columnspan=2,
+                                 sticky="ew", padx=12, pady=(0, 8))
+        btn = ttk.Frame(self)
+        btn.grid(row=8, column=0, columnspan=2, pady=(0, 12))
+        ttk.Button(btn, text="Export", command=self._ok).pack(side="left", padx=6)
+        ttk.Button(btn, text="Cancel", command=self.destroy).pack(side="left", padx=6)
+
+        self.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        self.wait_window(self)
+
+    def _ok(self) -> None:
+        import re as _re
+        bp = self._bp_var.get().strip().strip('"').strip("'") or self._DEFAULT_BP
+        # Auto-convert filesystem .uasset path → Content Browser path
+        m = _re.search(r'[/\\]Content[/\\](.+?)(?:\.uasset)?$', bp, _re.IGNORECASE)
+        if m:
+            bp = "/Game/" + m.group(1).replace("\\", "/")
+        try:
+            scale = float(self._scale_var.get().replace(",", "").replace(" ", "") or self._DEFAULT_SCALE)
+        except ValueError:
+            scale = float(self._DEFAULT_SCALE)
+        self.result = (bp, scale, self._merge_var.get())
+        self.destroy()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -240,6 +326,9 @@ class GISRoadMaster:
         self._s_deadend  = SliderRow(param_frame, "Dead-end Branch Pruning",
                                      0.0,    0.02,   0.0,    0.0002,  "{:.4f}",
                                      on_change=self._on_minlen_change)
+        self._s_cutback  = SliderRow(param_frame, "Intersection Cutback",
+                                     0.0,    0.02,   0.0,    0.0002,  "{:.4f}",
+                                     on_change=self._on_minlen_change)
         self._toggle_auto()
 
         # ── Workflow action buttons ───────────────────────────────────────
@@ -392,16 +481,27 @@ class GISRoadMaster:
         self._redraw_map()
 
     def _apply_minlen(self, lines: list) -> list:
-        """Apply min-length filter then iterative dead-end branch pruning."""
-        # 1. Drop all lines shorter than the absolute minimum
+        """
+        Apply all live post-processing filters in pipeline order:
+          1. Min line length       – drop lines shorter than threshold
+          2. Dead-end pruning      – iteratively remove dangling branches
+          3. Intersection cutback  – trim lines back from every intersection
+                                     (always last so it acts on clean geometry)
+        """
+        # 1. Min line length
         minlen = self._s_minlen.get()
         if minlen > 0:
             lines = [l for l in lines if l.length >= minlen]
 
-        # 2. Iteratively prune dangling branches (combs/spikes at junctions)
+        # 2. Dead-end branch pruning
         deadend = self._s_deadend.get()
         if deadend > 0:
             lines = prune_dead_ends(lines, deadend)
+
+        # 3. Intersection cutback  ← always the last action
+        cutback = self._s_cutback.get()
+        if cutback > 0 and lines:
+            lines = cut_intersections(lines, cutback)
 
         return lines
 
@@ -1467,20 +1567,26 @@ class GISRoadMaster:
         if not path:
             return
 
+        dlg = _FBXExportDialog(self.root)
+        if dlg.result is None:
+            return
+        bp_path, scale, merge = dlg.result
+
         self._set_busy(True, "Exporting FBX Bezier curves…")
         lines = list(self.master_lines)
 
         def _work():
-            return export_fbx(lines, path)
+            return export_fbx(lines, path, blueprint_path=bp_path, scale=scale, merge=merge)
 
         def _done(n: int) -> None:
             self._set_busy(False, "FBX export complete")
+            label = "1 merged spline" if merge else f"{n} Bezier curve{'s' if n != 1 else ''}"
             messagebox.showinfo(
                 "FBX Exported",
-                f"Saved {n} Bezier curve{'s' if n != 1 else ''} to:\n{path}\n\n"
-                "Each centerline is a cubic C1-continuous NURBS curve\n"
-                "(degree 3, Catmull-Rom → Bezier conversion).\n"
-                "Import into Blender, Maya, 3ds Max, etc.")
+                f"Saved {label} to:\n{path}\n\n"
+                "Run the companion *_unreal_splines.py script inside the\n"
+                "Unreal Editor (Tools → Execute Python Script) to spawn\n"
+                f"instances of '{bp_path}' in your level.")
 
         self._launch_thread(_work, _done)
 

@@ -278,87 +278,323 @@ def _fbx_takes() -> str:
 _UNREAL_SCRIPT_TEMPLATE = '''\
 """
 unreal_import_splines.py  -  GIS Road Master companion script
-=====================================================================
-HOW TO RUN (two options):
-
-  Option A - Execute Python Script
-    Tools -> Execute Python Script -> select this file
-    (requires Python Editor Script Plugin enabled + editor restart)
-
-  Option B - Python Console (always works)
-    Window -> Output Log
-    Change the left dropdown from "Cmd" to "Python"
-    Paste the contents of this file and press Enter
-
-CONFIGURATION - edit the two lines marked CONFIGURE below.
-
-What it does
-------------
-Reads the companion JSON file (exported alongside the FBX), then
-creates one Actor with a SplineComponent per centerline in the
-currently open level, named Road_0000, Road_0001, etc.
-
-Requirements
-------------
-  Unreal Engine 5.x
-  Python Editor Script Plugin enabled
-  Editor Scripting Utilities Plugin enabled
+Run via:  Tools → Execute Python Script → select this file
+Requires: Python Editor Script Plugin + Editor Scripting Utilities Plugin
 """
 
-import json, os, unreal
+import json, math, os, sys, unreal
 
-# ── CONFIGURE ─────────────────────────────────────────────────────
-JSON_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "{{json_name}}")
-SCALE     = 100000.0   # multiply GIS coordinates -> Unreal cm
-#   1 geographic degree ~ 111 km ~ 11,100,000 cm, but tune to your data.
-#   If roads appear tiny: increase SCALE.  If they are huge: decrease it.
+# ── Defaults written by GIS Road Master (editable in the GUI) ─────
+_DEFAULT_JSON      = os.path.join(os.path.dirname(os.path.abspath(__file__)), "{{json_name}}")
+_DEFAULT_BP        = "{{blueprint_path}}"
+_DEFAULT_SCALE     = {{scale}}
+_DEFAULT_MERGE     = {{merge}}
 # ──────────────────────────────────────────────────────────────────
 
-with open(JSON_FILE, encoding="utf-8") as _f:
-    roads = json.load(_f)
 
-def _spawn_road(idx, flat_pts):
-    pts = [(flat_pts[i], flat_pts[i+1], flat_pts[i+2])
-           for i in range(0, len(flat_pts), 3)]
-    if len(pts) < 2:
-        return False
+# ═══════════════════════════════════════════════════════════════════
+#  IMPORT LOGIC
+# ═══════════════════════════════════════════════════════════════════
 
-    ref_x, ref_y = pts[0][0], pts[0][1]
+def _to_pts(flat):
+    return [(flat[i], flat[i+1], flat[i+2]) for i in range(0, len(flat), 3)]
 
-    # Spawn a plain Actor then register a SplineComponent onto it.
-    # EditorLevelLibrary works in UE5 with Editor Scripting Utilities.
-    actor = unreal.EditorLevelLibrary.spawn_actor_from_class(
-        unreal.Actor,
-        unreal.Vector(0.0, 0.0, 0.0),
-        unreal.Rotator(0.0, 0.0, 0.0),
-    )
-    actor.set_actor_label("Road_{:04d}".format(idx))
+def _dist2d(a, b):
+    return math.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
 
-    spline = actor.add_component_by_class(
-        unreal.SplineComponent, False, unreal.Transform(), True)
+def _road_length(road):
+    return sum(_dist2d(road[i], road[i+1]) for i in range(len(road)-1))
 
-    if spline is None:
-        unreal.log_warning("Road_{:04d}: SplineComponent could not be added".format(idx))
-        actor.destroy_actor()
-        return False
+def _chain_roads(road_list, max_dist_gis):
+    remaining = list(road_list)
+    chains, current = [], [remaining.pop(0)]
+    while remaining:
+        last = current[-1][-1]
+        best_i, best_rev, best_d = 0, False, float("inf")
+        for i, r in enumerate(remaining):
+            d_s = _dist2d(last, r[0])
+            d_e = _dist2d(last, r[-1])
+            if d_s < best_d: best_d, best_i, best_rev = d_s, i, False
+            if d_e < best_d: best_d, best_i, best_rev = d_e, i, True
+        if max_dist_gis > 0 and best_d > max_dist_gis:
+            chains.append([p for road in current for p in road])
+            current = [remaining.pop(best_i)]
+        else:
+            nxt = remaining.pop(best_i)
+            current.append(nxt[::-1] if best_rev else nxt)
+    chains.append([p for road in current for p in road])
+    return chains
 
-    spline.clear_spline_points(True)
-    for x, y, z in pts:
-        spline.add_spline_world_point(
-            unreal.Vector((x - ref_x) * SCALE,
-                          (y - ref_y) * SCALE,
-                          z * SCALE))
-    spline.update_spline()
-    return True
 
-created = 0
-with unreal.ScopedEditorTransaction("GIS Road Master: Import Splines"):
-    for i, flat in enumerate(roads):
-        if _spawn_road(i, flat):
-            created += 1
+def run_import(json_file, blueprint_path, scale, merge, max_connect_dist, log_fn):
+    """Core import. log_fn(msg) is called for each status line."""
+    try:
+        with open(json_file, encoding="utf-8") as f:
+            roads = json.load(f)
+    except Exception as e:
+        log_fn("ERROR loading JSON: {}".format(e))
+        return
 
-unreal.log("GIS Road Master: created {} SplineActors (scale={})".format(created, SCALE))
-unreal.log("Tip: select all Road_* actors and adjust scale in Details if roads look too big/small.")
+    ref_x, ref_y = roads[0][0], roads[0][1]
+    log_fn("Reference origin: ({:.6f}, {:.6f})".format(ref_x, ref_y))
+
+    bp_class = unreal.EditorAssetLibrary.load_blueprint_class(blueprint_path)
+    if bp_class is None:
+        log_fn("ERROR: Could not load Blueprint '{}'".format(blueprint_path))
+        log_fn("Check the Content Browser path and try again.")
+        return
+    log_fn("Blueprint loaded: {}".format(blueprint_path))
+
+    eas = unreal.EditorLevelLibrary
+    existing = {a.get_actor_label() for a in eas.get_all_level_actors()}
+
+    def _centroid(pts):
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return (sum(xs)/len(xs), sum(ys)/len(ys))
+
+    def _spawn_actor(label, pts):
+        """
+        Spawn one Blueprint actor, populate its SplineComponent, and return
+        the actor.  Construction script is NOT called here — caller must call
+        actor.run_construction_script() after ALL actors have been populated.
+        This prevents BP_Road_Creator (and similar tools) from triggering a
+        global road-rebuild that overwrites previously spawned actors.
+        """
+        cx, cy = _centroid(pts)
+        spawn_loc = unreal.Vector(
+            (cx - ref_x) * scale,
+            (cy - ref_y) * scale,
+            0.0,
+        )
+        try:
+            actor = eas.spawn_actor_from_class(
+                bp_class, spawn_loc, unreal.Rotator(0, 0, 0))
+        except Exception as exc:
+            log_fn("  ERROR spawning {}: {}".format(label, exc))
+            return None
+
+        if actor is None:
+            log_fn("  ERROR: spawn_actor_from_class returned None for {}".format(label))
+            return None
+
+        actor.set_actor_label(label)
+
+        spline = actor.get_component_by_class(unreal.SplineComponent)
+        if spline is None:
+            log_fn("  WARNING {}: Blueprint has no SplineComponent".format(label))
+            actor.destroy_actor()
+            return None
+
+        spline.clear_spline_points(True)
+        for x, y, z in pts:
+            spline.add_spline_world_point(
+                unreal.Vector((x - ref_x) * scale,
+                              (y - ref_y) * scale,
+                              z * scale))
+        spline.update_spline()
+        return actor
+
+    created = skipped = errors = 0
+    new_actors = []   # collect here; run construction scripts in one final pass
+
+    # ── Build the road list (merge or individual) ──────────────────────────
+    if merge:
+        road_pts = [_to_pts(flat) for flat in roads if len(flat) >= 6]
+        threshold = max_connect_dist / scale if max_connect_dist > 0 else 0
+        if threshold == 0 and road_pts:
+            lengths = sorted(_road_length(r) for r in road_pts)
+            threshold = lengths[len(lengths) // 2] * 3.0
+        chains = _chain_roads(road_pts, threshold)
+        log_fn("{} road(s) → {} cluster(s)  (gap threshold {:.6f} GIS units)".format(
+            len(road_pts), len(chains), threshold))
+        work = [("Road_Merged_{:04d}".format(ci), pts)
+                for ci, pts in enumerate(chains)]
+    else:
+        work = []
+        for i, flat in enumerate(roads):
+            pts = _to_pts(flat)
+            if len(pts) >= 2:
+                work.append(("Road_{:04d}".format(i), pts))
+        log_fn("{} road(s) to import".format(len(work)))
+
+    # ── Pass 1: spawn actors + fill splines (no construction scripts yet) ──
+    with unreal.ScopedEditorTransaction("GIS Road Master: Spawn Actors"):
+        for label, pts in work:
+            if label in existing:
+                log_fn("  skipped {} (already in level — delete to reimport)".format(label))
+                skipped += 1
+                continue
+            actor = _spawn_actor(label, pts)
+            if actor is not None:
+                new_actors.append(actor)
+                created += 1
+                log_fn("  spawned {}  ({} pts)".format(label, len(pts)))
+            else:
+                errors += 1
+
+    # ── Pass 2: trigger construction scripts now that all splines are set ──
+    if new_actors:
+        log_fn("Running construction scripts on {} actor(s)…".format(len(new_actors)))
+        with unreal.ScopedEditorTransaction("GIS Road Master: Construction Scripts"):
+            for actor in new_actors:
+                try:
+                    actor.run_construction_script()
+                except Exception as exc:
+                    log_fn("  WARNING construction script failed: {}".format(exc))
+
+    log_fn("")
+    log_fn("── Summary ──────────────────────────────────────")
+    log_fn("  Created : {}".format(created))
+    log_fn("  Skipped : {}  (already existed)".format(skipped))
+    log_fn("  Errors  : {}".format(errors))
+    if skipped:
+        log_fn("  Tip: delete Road_* actors you want to reimport, then run again.")
+    unreal.log("GIS Road Master: created={} skipped={} errors={} scale={}".format(
+        created, skipped, errors, scale))
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  GUI  (PySide2 — bundled with Unreal Engine 5)
+# ═══════════════════════════════════════════════════════════════════
+
+try:
+    from PySide2 import QtWidgets, QtCore, QtGui
+except ImportError:
+    # Fallback: run headless with defaults
+    unreal.log_warning("PySide2 not available — running with default settings.")
+    run_import(_DEFAULT_JSON, _DEFAULT_BP, _DEFAULT_SCALE, _DEFAULT_MERGE, 0,
+               lambda m: unreal.log(m))
+    raise SystemExit
+
+
+class ImportDialog(QtWidgets.QDialog):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("GIS Road Master — Unreal Spline Import")
+        self.setMinimumWidth(560)
+        self.setWindowFlags(self.windowFlags() | QtCore.Qt.WindowStaysOnTopHint)
+
+        root = QtWidgets.QVBoxLayout(self)
+        root.setSpacing(10)
+        root.setContentsMargins(14, 14, 14, 14)
+
+        # ── JSON file ──────────────────────────────────────────────
+        grp_file = QtWidgets.QGroupBox("Data File")
+        fl = QtWidgets.QHBoxLayout(grp_file)
+        self.json_edit = QtWidgets.QLineEdit(_DEFAULT_JSON)
+        browse_btn = QtWidgets.QPushButton("Browse…")
+        browse_btn.setFixedWidth(80)
+        browse_btn.clicked.connect(self._browse_json)
+        fl.addWidget(self.json_edit)
+        fl.addWidget(browse_btn)
+        root.addWidget(grp_file)
+
+        # ── Blueprint ──────────────────────────────────────────────
+        grp_bp = QtWidgets.QGroupBox("Unreal Blueprint")
+        bl = QtWidgets.QFormLayout(grp_bp)
+        self.bp_edit = QtWidgets.QLineEdit(_DEFAULT_BP)
+        self.bp_edit.setPlaceholderText("/Game/MyBP/BP_Road")
+        bl.addRow("Content path:", self.bp_edit)
+        root.addWidget(grp_bp)
+
+        # ── Scale + Merge ──────────────────────────────────────────
+        grp_opts = QtWidgets.QGroupBox("Import Options")
+        ol = QtWidgets.QFormLayout(grp_opts)
+        ol.setSpacing(8)
+
+        self.scale_spin = QtWidgets.QDoubleSpinBox()
+        self.scale_spin.setRange(0.001, 1e9)
+        self.scale_spin.setDecimals(1)
+        self.scale_spin.setSingleStep(1000)
+        self.scale_spin.setValue(_DEFAULT_SCALE)
+        self.scale_spin.setToolTip(
+            "1 degree ≈ 11 100 000 cm\\n"
+            "1 metre  ≈ 100 cm\\n"
+            "Increase if roads look tiny; decrease if they are huge.")
+        ol.addRow("Scale (GIS → Unreal cm):", self.scale_spin)
+
+        self.merge_chk = QtWidgets.QCheckBox("Merge roads into clusters (fewer actors)")
+        self.merge_chk.setChecked(_DEFAULT_MERGE)
+        self.merge_chk.toggled.connect(self._on_merge_toggle)
+        ol.addRow("", self.merge_chk)
+
+        self.maxdist_spin = QtWidgets.QDoubleSpinBox()
+        self.maxdist_spin.setRange(0, 1e12)
+        self.maxdist_spin.setDecimals(0)
+        self.maxdist_spin.setSingleStep(10000)
+        self.maxdist_spin.setValue(0)
+        self.maxdist_spin.setSpecialValueText("Auto (3× median road length)")
+        self.maxdist_spin.setToolTip(
+            "Maximum gap (Unreal cm) allowed when chaining roads together.\\n"
+            "Roads farther apart than this become separate actors.\\n"
+            "0 = auto-calculate from your data.")
+        self.maxdist_spin.setEnabled(_DEFAULT_MERGE)
+        ol.addRow("Max connect distance (cm):", self.maxdist_spin)
+
+        root.addWidget(grp_opts)
+
+        # ── Log ────────────────────────────────────────────────────
+        grp_log = QtWidgets.QGroupBox("Log")
+        ll = QtWidgets.QVBoxLayout(grp_log)
+        self.log_box = QtWidgets.QPlainTextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setFixedHeight(160)
+        self.log_box.setFont(QtGui.QFont("Consolas", 9))
+        ll.addWidget(self.log_box)
+        root.addWidget(grp_log)
+
+        # ── Buttons ────────────────────────────────────────────────
+        btn_row = QtWidgets.QHBoxLayout()
+        self.import_btn = QtWidgets.QPushButton("Import")
+        self.import_btn.setDefault(True)
+        self.import_btn.setFixedHeight(32)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.setFixedHeight(32)
+        self.import_btn.clicked.connect(self._do_import)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self.import_btn)
+        btn_row.addWidget(close_btn)
+        root.addLayout(btn_row)
+
+    # ── slots ──────────────────────────────────────────────────────
+
+    def _browse_json(self):
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self, "Select road curves JSON", self.json_edit.text(),
+            "JSON files (*.json);;All files (*.*)")
+        if path:
+            self.json_edit.setText(path)
+
+    def _on_merge_toggle(self, checked):
+        self.maxdist_spin.setEnabled(checked)
+
+    def _log(self, msg):
+        self.log_box.appendPlainText(msg)
+        QtWidgets.QApplication.processEvents()
+
+    def _do_import(self):
+        self.import_btn.setEnabled(False)
+        self.log_box.clear()
+        self._log("Starting import…")
+        try:
+            run_import(
+                json_file       = self.json_edit.text().strip(),
+                blueprint_path  = self.bp_edit.text().strip(),
+                scale           = self.scale_spin.value(),
+                merge           = self.merge_chk.isChecked(),
+                max_connect_dist= self.maxdist_spin.value(),
+                log_fn          = self._log,
+            )
+        except Exception as exc:
+            self._log("EXCEPTION: {}".format(exc))
+        finally:
+            self.import_btn.setEnabled(True)
+
+
+app = QtWidgets.QApplication.instance() or QtWidgets.QApplication(sys.argv)
+dlg = ImportDialog()
+dlg.exec_()
 '''
 
 
@@ -371,6 +607,9 @@ def export_fbx(
     output_path: str,
     z_value: float = 0.0,
     min_points: int = 2,
+    blueprint_path: str = "/Game/Road_Creator_Pro/Blueprints/BP_Road_Creator",
+    scale: float = 100000.0,
+    merge: bool = False,
 ) -> int:
     """
     Export a list of Shapely LineStrings as FBX Bezier curves.
@@ -451,7 +690,11 @@ def export_fbx(
     # ── Write Unreal companion script ─────────────────────────────────
     script_path = fbx_path.with_name(fbx_path.stem + "_unreal_splines.py")
     script_path.write_text(
-        _UNREAL_SCRIPT_TEMPLATE.replace("{{json_name}}", json_path.name),
+        _UNREAL_SCRIPT_TEMPLATE
+            .replace("{{json_name}}", json_path.name)
+            .replace("{{blueprint_path}}", blueprint_path)
+            .replace("{{scale}}", repr(float(scale)))
+            .replace("{{merge}}", "True" if merge else "False"),
         encoding="utf-8")
 
     return len(curves)

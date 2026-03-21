@@ -8,11 +8,24 @@ Build with:
 Output: dist/GIS Road Master/GIS Road Master.exe
 """
 
+import os, sys, glob as _glob
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 datas      = []
 binaries   = []
 hiddenimports = []
+
+# ── Explicitly bundle python314.dll + its VC runtime siblings ──────────────
+# PyInstaller 6.x misses these when Python is installed in a non-standard
+# location (e.g. AppData\Local\Python\pythoncore-3.14-64).
+_py_dir = os.path.dirname(sys.executable)
+for _dll_pattern in [
+    "python3*.dll",       # python314.dll, python3.dll
+    "vcruntime140*.dll",  # vcruntime140.dll, vcruntime140_1.dll
+]:
+    for _dll in _glob.glob(os.path.join(_py_dir, _dll_pattern)):
+        binaries.append((_dll, "."))
+# ───────────────────────────────────────────────────────────────────────────
 
 # ── Geospatial stack (includes GDAL/GEOS/PROJ native data files) ───────────
 for pkg in [

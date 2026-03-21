@@ -521,6 +521,140 @@ def process_single(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# INTERSECTION CUTTER
+# ─────────────────────────────────────────────────────────────────────────────
+
+def cut_intersections(
+    lines: list[LineString],
+    cutback: float,
+    min_seg: float | None = None,
+) -> list[LineString]:
+    """
+    Trim every centerline ``cutback`` coordinate-units back from each
+    intersection it participates in.
+
+    * At **T-junctions** only the dangling end is trimmed inward.
+    * At **X-crossings** both roads are trimmed on each side of the crossing,
+      effectively splitting each road into two shorter segments.
+    * **Shared endpoints** (Y-forks) trim all participating roads inward by
+      ``cutback``, leaving a clean gap at the junction.
+
+    Parameters
+    ----------
+    lines   : list of shapely LineString (centerlines)
+    cutback : distance in the same units as the coordinate system
+              (metres for projected CRS, degrees for geographic CRS)
+    min_seg : minimum length a surviving sub-segment must have to be kept;
+              defaults to ``cutback``.  Raise this to suppress tiny stubs.
+
+    Returns
+    -------
+    list of LineString – may be *longer* than the input when X-crossings
+    are encountered (each crossing splits a road in two).
+    """
+    from shapely.strtree import STRtree
+    from shapely.ops import substring
+    from shapely.geometry import Point as _Pt
+
+    if not lines or cutback <= 0:
+        return list(lines)
+    if min_seg is None:
+        min_seg = cutback
+
+    n = len(lines)
+    # hit_dists[i] accumulates distances along lines[i] at each intersection
+    hit_dists: list[list[float]] = [[] for _ in range(n)]
+
+    tree = STRtree(lines)
+
+    for i, line in enumerate(lines):
+        for j in tree.query(line, predicate="intersects"):
+            if j <= i:
+                continue
+            other = lines[j]
+            inter = line.intersection(other)
+            if inter.is_empty:
+                continue
+
+            # Collect intersection points
+            gtype = inter.geom_type
+            if gtype == "Point":
+                pts = [inter]
+            elif gtype == "MultiPoint":
+                pts = list(inter.geoms)
+            elif gtype in ("LineString", "MultiLineString"):
+                # collinear overlap – use both endpoints of the overlap
+                if gtype == "LineString":
+                    coords = list(inter.coords)
+                else:
+                    coords = [c for g in inter.geoms for c in g.coords]
+                pts = [_Pt(coords[0]), _Pt(coords[-1])]
+            elif gtype == "GeometryCollection":
+                pts = []
+                for g in inter.geoms:
+                    if g.geom_type == "Point":
+                        pts.append(g)
+                    elif g.geom_type == "LineString":
+                        cc = list(g.coords)
+                        pts += [_Pt(cc[0]), _Pt(cc[-1])]
+            else:
+                continue
+
+            for pt in pts:
+                hit_dists[i].append(line.project(pt))
+                hit_dists[j].append(other.project(pt))
+
+    result: list[LineString] = []
+    for i, line in enumerate(lines):
+        dists = sorted(set(hit_dists[i]))
+        if not dists:
+            result.append(line)
+            continue
+
+        L = line.length
+
+        # Build cut zones: [d-cutback … d+cutback] clamped to [0, L]
+        zones: list[list[float]] = []
+        for d in dists:
+            zones.append([max(0.0, d - cutback), min(L, d + cutback)])
+
+        # Merge overlapping zones
+        zones.sort()
+        merged: list[list[float]] = []
+        for zs, ze in zones:
+            if merged and zs <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], ze)
+            else:
+                merged.append([zs, ze])
+
+        # Extract surviving segments between the cut zones
+        segs: list[LineString] = []
+        prev = 0.0
+        for zs, ze in merged:
+            if zs - prev >= min_seg:
+                try:
+                    seg = substring(line, prev, zs)
+                    if not seg.is_empty and seg.length >= min_seg:
+                        segs.append(seg)
+                except Exception:
+                    pass
+            prev = ze
+        # trailing segment after the last cut zone
+        if L - prev >= min_seg:
+            try:
+                seg = substring(line, prev, L)
+                if not seg.is_empty and seg.length >= min_seg:
+                    segs.append(seg)
+            except Exception:
+                pass
+
+        result.extend(segs if segs else [line])
+
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # JUNCTION SMOOTHING
 # ─────────────────────────────────────────────────────────────────────────────
 
