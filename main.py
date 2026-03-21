@@ -1574,9 +1574,11 @@ class GISRoadMaster:
 
         self._set_busy(True, "Exporting FBX Bezier curves…")
         lines = list(self.master_lines)
+        src_crs = self.gdf.crs if self.gdf is not None else None
 
         def _work():
-            return export_fbx(lines, path, blueprint_path=bp_path, scale=scale, merge=merge)
+            return export_fbx(lines, path, blueprint_path=bp_path,
+                               scale=scale, merge=merge, crs=src_crs)
 
         def _done(n: int) -> None:
             self._set_busy(False, "FBX export complete")

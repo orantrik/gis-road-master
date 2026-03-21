@@ -41,6 +41,38 @@ import numpy as np
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CRS / REPROJECTION HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _is_geographic(crs) -> bool:
+    """Return True if *crs* is already a geographic (lat/lon) CRS."""
+    try:
+        from pyproj import CRS as _CRS
+        return _CRS(crs).is_geographic
+    except Exception:
+        return False
+
+
+def _reproject_to_wgs84(lines: list, src_crs) -> list:
+    """
+    Reproject a list of Shapely LineStrings to WGS 84 (EPSG:4326).
+    Coordinates come out in (longitude, latitude) order.
+    If *src_crs* is already geographic the lines are returned unchanged.
+    """
+    if _is_geographic(src_crs):
+        return lines
+    try:
+        from pyproj import Transformer
+        from shapely.ops import transform as _shp_transform
+        tr = Transformer.from_crs(src_crs, "EPSG:4326", always_xy=True)
+        return [_shp_transform(tr.transform, ln) for ln in lines]
+    except Exception as exc:
+        import warnings
+        warnings.warn(f"CRS reprojection failed ({exc}); coordinates kept as-is.")
+        return lines
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CURVE MATH
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -326,13 +358,85 @@ def _chain_roads(road_list, max_dist_gis):
     return chains
 
 
+def _find_cesium_georeference():
+    """
+    Return the CesiumGeoreference actor in the current level, or None.
+    Tries both the Python class name and a string-based fallback so it
+    works even if the Cesium plugin is loaded but the class is unknown.
+    """
+    try:
+        for actor in unreal.EditorLevelLibrary.get_all_level_actors():
+            cls_name = actor.get_class().get_name()
+            if "CesiumGeoreference" in cls_name:
+                return actor
+    except Exception:
+        pass
+    return None
+
+
+def _make_coord_converter(georeference, ref_x, ref_y, scale, is_geographic, log_fn):
+    """
+    Return a function  f(x, y, z) -> unreal.Vector  that converts
+    one GIS point to Unreal world-space coordinates.
+
+    If *georeference* is not None AND the data is geographic (lon/lat):
+        Uses CesiumGeoreference.transform_longitude_latitude_height_to_unreal()
+        → perfectly geo-registered in the Cesium world.
+
+    Otherwise:
+        Falls back to the origin-relative scale approach.
+    """
+    if georeference is not None and is_geographic:
+        log_fn("Cesium Georeference found — using geographic transform (lon/lat → world).")
+        def _cesium(x, y, z):
+            # x = longitude, y = latitude, z = height in metres
+            try:
+                return georeference.transform_longitude_latitude_height_to_unreal(
+                    unreal.Vector(x, y, z))
+            except Exception:
+                # Some Cesium versions expose it via BlueprintLibrary
+                return unreal.CesiumBlueprintLibrary \
+                    .transform_longitude_latitude_height_to_unreal(
+                        georeference, x, y, z)
+        return _cesium
+    else:
+        if georeference is not None and not is_geographic:
+            log_fn("WARNING: Cesium Georeference found but data CRS is projected (not lat/lon).")
+            log_fn("         Re-export from GIS Road Master to embed WGS-84 coordinates,")
+            log_fn("         then the Cesium transform will be used automatically.")
+        elif is_geographic:
+            log_fn("No Cesium Georeference actor in level — using scale-based positioning.")
+            log_fn("Add a CesiumGeoreference actor for accurate geo-registration.")
+        def _scale(x, y, z):
+            return unreal.Vector((x - ref_x) * scale,
+                                 (y - ref_y) * scale,
+                                 z * scale)
+        return _scale
+
+
 def run_import(json_file, blueprint_path, scale, merge, max_connect_dist, log_fn):
     """Core import. log_fn(msg) is called for each status line."""
     try:
         with open(json_file, encoding="utf-8") as f:
-            roads = json.load(f)
+            raw = json.load(f)
     except Exception as e:
         log_fn("ERROR loading JSON: {}".format(e))
+        return
+
+    # Support both v1.0 format (bare list) and v1.1+ format (dict with metadata)
+    if isinstance(raw, dict):
+        roads        = raw.get("roads", [])
+        file_crs     = raw.get("crs", "unknown")
+        is_geographic = raw.get("coord_type", "geographic") == "geographic"
+        log_fn("JSON v{}  CRS: {}".format(raw.get("version", "?"), file_crs))
+    else:
+        roads        = raw           # legacy bare list
+        file_crs     = "unknown"
+        is_geographic = False        # unknown — use scale fallback
+        log_fn("JSON v1.0 (legacy format) — no CRS metadata, using scale-based positioning.")
+
+    if not roads:
+        log_fn("ERROR: no roads found in JSON.")
         return
 
     ref_x, ref_y = roads[0][0], roads[0][1]
@@ -344,6 +448,11 @@ def run_import(json_file, blueprint_path, scale, merge, max_connect_dist, log_fn
         log_fn("Check the Content Browser path and try again.")
         return
     log_fn("Blueprint loaded: {}".format(blueprint_path))
+
+    # ── Cesium Georeference detection ──────────────────────────────────────
+    georeference = _find_cesium_georeference()
+    to_ue = _make_coord_converter(georeference, ref_x, ref_y, scale,
+                                  is_geographic, log_fn)
 
     eas = unreal.EditorLevelLibrary
     existing = {a.get_actor_label() for a in eas.get_all_level_actors()}
@@ -362,11 +471,7 @@ def run_import(json_file, blueprint_path, scale, merge, max_connect_dist, log_fn
         global road-rebuild that overwrites previously spawned actors.
         """
         cx, cy = _centroid(pts)
-        spawn_loc = unreal.Vector(
-            (cx - ref_x) * scale,
-            (cy - ref_y) * scale,
-            0.0,
-        )
+        spawn_loc = to_ue(cx, cy, 0.0)
         try:
             actor = eas.spawn_actor_from_class(
                 bp_class, spawn_loc, unreal.Rotator(0, 0, 0))
@@ -388,10 +493,7 @@ def run_import(json_file, blueprint_path, scale, merge, max_connect_dist, log_fn
 
         spline.clear_spline_points(True)
         for x, y, z in pts:
-            spline.add_spline_world_point(
-                unreal.Vector((x - ref_x) * scale,
-                              (y - ref_y) * scale,
-                              z * scale))
+            spline.add_spline_world_point(to_ue(x, y, z))
         spline.update_spline()
         return actor
 
@@ -610,6 +712,7 @@ def export_fbx(
     blueprint_path: str = "/Game/Road_Creator_Pro/Blueprints/BP_Road_Creator",
     scale: float = 100000.0,
     merge: bool = False,
+    crs=None,
 ) -> int:
     """
     Export a list of Shapely LineStrings as FBX Bezier curves.
@@ -630,6 +733,12 @@ def export_fbx(
     -------
     Number of curves written.
     """
+    # ── Reproject to WGS84 if a source CRS is provided ───────────────
+    geo_crs_str = None
+    if crs is not None:
+        lines = _reproject_to_wgs84(lines, crs)
+        geo_crs_str = "EPSG:4326"   # output is always WGS84 after reprojection
+
     valid_lines = [
         ln for ln in lines
         if ln is not None and not ln.is_empty
@@ -638,7 +747,7 @@ def export_fbx(
 
     # ── Collect geometry data ─────────────────────────────────────────
     curves: list[tuple] = []    # (ctrl_pts, knots, bezier_json) per line
-    all_ctrl_flat: list[list] = []
+    road_waypoints: list[list] = []   # original vertex coords per road (for JSON)
 
     for line in valid_lines:
         coords = list(line.coords)
@@ -648,8 +757,12 @@ def export_fbx(
         ctrl_pts, knots = _segs_to_nurbs(segs, z=z_value)
         bzjson = _ctrl_to_json_flat(ctrl_pts, z=z_value)
         curves.append((ctrl_pts, knots, bzjson))
-        flat = [v for pt in ctrl_pts for v in [pt[0], pt[1], pt[2]]]
-        all_ctrl_flat.append(flat)
+        # Store original vertices (not bezier ctrl pts) for the companion JSON
+        if len(coords[0]) == 2:
+            flat = [v for x, y in coords for v in (x, y, z_value)]
+        else:
+            flat = [v for x, y, z in coords for v in (x, y, z)]
+        road_waypoints.append(flat)
 
     # ── Build FBX text ────────────────────────────────────────────────
     parts: list[str] = [
@@ -683,8 +796,20 @@ def export_fbx(
 
     # ── Write companion JSON ──────────────────────────────────────────
     json_path = fbx_path.with_name(fbx_path.stem + "_curves.json")
+    json_payload: dict | list
+    if geo_crs_str:
+        # v1.1 structured format — includes CRS so Unreal script can use Cesium
+        json_payload = {
+            "version": "1.1",
+            "crs": geo_crs_str,
+            "coord_type": "geographic",   # lon/lat/height
+            "roads": road_waypoints,
+        }
+    else:
+        # v1.0 legacy bare-list format (no CRS reprojection was done)
+        json_payload = road_waypoints
     json_path.write_text(
-        json.dumps(all_ctrl_flat, separators=(",", ":")),
+        json.dumps(json_payload, separators=(",", ":")),
         encoding="utf-8")
 
     # ── Write Unreal companion script ─────────────────────────────────
