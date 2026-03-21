@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GIS Road Master</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+<!-- ══ TITLE BAR ══════════════════════════════════════════════════════ -->
+<header class="titlebar">
+  <div class="titlebar-left">
+    <svg class="logo-icon" viewBox="0 0 24 24" fill="none">
+      <path d="M3 12h3m12 0h3M12 3v3m0 12v3" stroke="var(--accent)" stroke-width="2" stroke-linecap="round"/>
+      <circle cx="12" cy="12" r="4" stroke="var(--accent)" stroke-width="2"/>
+      <path d="M7 7l2 2m6 6l2 2M7 17l2-2m6-6l2-2" stroke="var(--accent2)" stroke-width="1.5" stroke-linecap="round" opacity="0.6"/>
+    </svg>
+    <span class="app-name">GIS <strong>ROAD MASTER</strong></span>
+    <span class="version-badge">v1.0</span>
+  </div>
+  <div class="titlebar-center" id="titlebar-status">
+    <span class="status-dot" id="status-dot"></span>
+    <span id="status-text">Ready</span>
+  </div>
+  <div class="titlebar-right">
+    <span class="segment-counter" id="segment-counter" style="display:none">
+      <svg viewBox="0 0 16 16" width="12" height="12" fill="none">
+        <path d="M2 8h12M2 4l4 4-4 4" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <span id="segment-count">0</span> segments
+    </span>
+  </div>
+</header>
+
+<!-- ══ MAIN LAYOUT ═════════════════════════════════════════════════════ -->
+<div class="app-layout">
+
+  <!-- ── LEFT SIDEBAR ──────────────────────────────────────────────── -->
+  <aside class="sidebar">
+    <div class="sidebar-inner">
+
+      <!-- File Load -->
+      <section class="panel">
+        <div class="panel-header">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <rect x="2" y="2" width="12" height="12" rx="2" stroke="var(--accent)" stroke-width="1.5"/>
+            <path d="M5 8h6M8 5v6" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          Data Source
+        </div>
+        <button class="btn btn-primary btn-full" id="btn-load">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path d="M8 2v8m-3-3l3 3 3-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M3 12h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          Load GIS File
+        </button>
+        <div class="file-info" id="file-info" style="display:none">
+          <div class="file-info-row">
+            <span class="fi-label">File</span>
+            <span class="fi-val" id="fi-name">—</span>
+          </div>
+          <div class="file-info-row">
+            <span class="fi-label">Features</span>
+            <span class="fi-val accent" id="fi-rows">—</span>
+          </div>
+          <div class="file-info-row">
+            <span class="fi-label">CRS</span>
+            <span class="fi-val mono" id="fi-crs">—</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Filters -->
+      <section class="panel" id="panel-filters" style="display:none">
+        <div class="panel-header collapsible" data-target="filters-body">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path d="M2 4h12M4 8h8M6 12h4" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          Filters
+          <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" fill="none">
+            <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="panel-body" id="filters-body">
+          <div class="filter-group">
+            <div class="filter-group-label">
+              Plans
+              <div class="filter-actions">
+                <button class="micro-btn" onclick="selectAll('plans-list')">All</button>
+                <button class="micro-btn" onclick="selectNone('plans-list')">None</button>
+              </div>
+            </div>
+            <div class="checklist" id="plans-list"></div>
+          </div>
+          <div class="filter-group" style="margin-top:10px">
+            <div class="filter-group-label">
+              Road Types
+              <div class="filter-actions">
+                <button class="micro-btn" onclick="selectAll('types-list')">All</button>
+                <button class="micro-btn" onclick="selectNone('types-list')">None</button>
+              </div>
+            </div>
+            <div class="checklist" id="types-list"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Algorithm -->
+      <section class="panel" id="panel-algo" style="display:none">
+        <div class="panel-header collapsible" data-target="algo-body">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <circle cx="8" cy="8" r="5" stroke="var(--accent)" stroke-width="1.5"/>
+            <path d="M8 5v3l2 2" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+          Algorithm
+          <svg class="chevron" viewBox="0 0 16 16" width="12" height="12" fill="none">
+            <path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="panel-body" id="algo-body">
+          <div class="field">
+            <label class="field-label">Method</label>
+            <div class="select-wrap">
+              <select id="algo-select">
+                <option value="auto">Auto (Smart Dispatch)</option>
+                <option value="straight_skeleton">Straight Skeleton</option>
+                <option value="voronoi_density">Voronoi Density</option>
+                <option value="hatching">Hatching</option>
+                <option value="edt_ridge">EDT Ridge</option>
+              </select>
+              <svg class="select-arrow" viewBox="0 0 10 6" fill="none">
+                <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+              </svg>
+            </div>
+          </div>
+          <div id="method-report" class="method-report" style="display:none"></div>
+        </div>
+      </section>
+
+    </div><!-- /sidebar-inner -->
+  </aside>
+
+  <!-- ── MAP CANVAS ─────────────────────────────────────────────────── -->
+  <main class="map-area">
+    <div class="map-container" id="map-container">
+      <!-- Placeholder state -->
+      <div class="map-placeholder" id="map-placeholder">
+        <div class="placeholder-inner">
+          <svg viewBox="0 0 80 80" width="80" height="80" fill="none" class="placeholder-icon">
+            <circle cx="40" cy="40" r="38" stroke="var(--border)" stroke-width="1.5" stroke-dasharray="4 4"/>
+            <path d="M20 55 Q30 35 40 40 Q50 45 60 25" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" fill="none" opacity="0.5"/>
+            <circle cx="20" cy="55" r="3" fill="var(--accent)" opacity="0.5"/>
+            <circle cx="40" cy="40" r="3" fill="var(--accent2)" opacity="0.5"/>
+            <circle cx="60" cy="25" r="3" fill="var(--accent)" opacity="0.5"/>
+          </svg>
+          <p class="placeholder-title">No Data Loaded</p>
+          <p class="placeholder-sub">Load a GIS file to visualise road polygons</p>
+          <button class="btn btn-primary" id="btn-load2">Load File</button>
+        </div>
+      </div>
+      <!-- Map image -->
+      <img id="map-img" src="" alt="Map" style="display:none" />
+      <!-- Loading spinner overlay -->
+      <div class="map-spinner" id="map-spinner" style="display:none">
+        <div class="spinner-ring"></div>
+        <span id="spinner-label">Processing…</span>
+      </div>
+      <!-- Map toolbar -->
+      <div class="map-toolbar" id="map-toolbar" style="display:none">
+        <button class="map-tool" title="Refresh map" onclick="refreshMap()">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path d="M13 8A5 5 0 1 1 8 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            <path d="M13 3v5h-5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+        <div class="map-tool-sep"></div>
+        <button class="map-tool toggle-active" id="toggle-polygons" title="Show/hide polygons" onclick="toggleLayer(this, 'polygons')">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <rect x="2" y="4" width="12" height="8" rx="1.5" stroke="currentColor" stroke-width="1.5"/>
+          </svg>
+        </button>
+        <button class="map-tool toggle-active" id="toggle-centerlines" title="Show/hide centerlines" onclick="toggleLayer(this, 'centerlines')">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path d="M2 8h12M2 5l3 3-3 3M14 5l-3 3 3 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- ── RIGHT CONTROLS PANEL ──────────────────────────────────────── -->
+  <aside class="controls">
+    <div class="controls-inner">
+
+      <!-- Processing -->
+      <section class="panel">
+        <div class="panel-header">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path d="M3 8h2l2-4 2 8 2-4 2 4h2" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Processing
+        </div>
+        <div class="panel-body">
+          <div class="slider-row" id="ctrl-smooth">
+            <div class="slider-header">
+              <label>Smoothing</label>
+              <span class="slider-val" id="val-smooth">0</span>
+            </div>
+            <div class="slider-track-wrap">
+              <input type="range" min="0" max="20" step="1" value="0"
+                     id="s-smooth" oninput="syncSlider(this,'val-smooth')" />
+            </div>
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-header">
+              <label>Min Length</label>
+              <span class="slider-val" id="val-minlen">0.0000</span>
+            </div>
+            <div class="slider-track-wrap">
+              <input type="range" min="0" max="0.01" step="0.0001" value="0"
+                     id="s-minlen" oninput="syncSlider(this,'val-minlen',4)" />
+            </div>
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-header">
+              <label>Dead-end Pruning</label>
+              <span class="slider-val" id="val-prune">0.0000</span>
+            </div>
+            <div class="slider-track-wrap">
+              <input type="range" min="0" max="0.02" step="0.0002" value="0"
+                     id="s-prune" oninput="syncSlider(this,'val-prune',4)" />
+            </div>
+          </div>
+
+          <div class="slider-row">
+            <div class="slider-header">
+              <label>Intersection Cutback</label>
+              <span class="slider-val" id="val-cutback">0.0000</span>
+            </div>
+            <div class="slider-track-wrap">
+              <input type="range" min="0" max="0.02" step="0.0002" value="0"
+                     id="s-cutback" oninput="syncSlider(this,'val-cutback',4)" />
+            </div>
+          </div>
+
+          <button class="btn btn-primary btn-full btn-process" id="btn-process" disabled>
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+              <polygon points="3,2 13,8 3,14" fill="currentColor"/>
+            </svg>
+            Process Centerlines
+          </button>
+        </div>
+      </section>
+
+      <!-- Export Shapefile -->
+      <section class="panel">
+        <div class="panel-header">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path d="M8 2v8m-3-3l3 3 3-3M3 13h10" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Export Shapefile
+        </div>
+        <div class="panel-body">
+          <button class="btn btn-secondary btn-full" id="btn-export-shp" disabled>
+            Export .shp / .gpkg
+          </button>
+        </div>
+      </section>
+
+      <!-- Export FBX / Unreal -->
+      <section class="panel">
+        <div class="panel-header collapsible" data-target="fbx-body">
+          <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+            <path d="M4 4h8v8H4zM4 4l4-2 4 2M4 12l4 2 4-2M4 4v8M12 4v8" stroke="var(--accent)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Unreal / FBX Export
+          <svg class="chevron" viewBox="0 0 10 6" fill="none">
+            <path d="M1 1l4 4 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div class="panel-body" id="fbx-body">
+          <div class="field">
+            <label class="field-label">Blueprint Path</label>
+            <input class="field-input" type="text" id="bp-path"
+                   value="/Game/Road_Creator_Pro/Blueprints/BP_Road_Creator"
+                   placeholder="/Game/MyBP/BP_Road" />
+          </div>
+          <div class="field">
+            <label class="field-label">
+              Scale
+              <span class="field-hint">GIS → Unreal cm</span>
+            </label>
+            <input class="field-input mono" type="number" id="fbx-scale"
+                   value="100000" step="1000" min="0.001" />
+          </div>
+          <div class="toggle-row">
+            <label class="toggle-label">Merge into clusters</label>
+            <label class="toggle-switch">
+              <input type="checkbox" id="fbx-merge" />
+              <span class="toggle-thumb"></span>
+            </label>
+          </div>
+          <div class="field" id="maxdist-field" style="display:none">
+            <label class="field-label">
+              Max connect dist
+              <span class="field-hint">cm, 0 = auto</span>
+            </label>
+            <input class="field-input mono" type="number" id="fbx-maxdist" value="0" step="10000" min="0" />
+          </div>
+          <button class="btn btn-accent btn-full" id="btn-export-fbx" disabled>
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none">
+              <rect x="2" y="2" width="12" height="12" rx="2" stroke="currentColor" stroke-width="1.5"/>
+              <path d="M5 8h6M8 5v6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            Export FBX + Unreal Script
+          </button>
+        </div>
+      </section>
+
+    </div><!-- /controls-inner -->
+  </aside>
+
+</div><!-- /app-layout -->
+
+<!-- ══ STATUS BAR ═════════════════════════════════════════════════════ -->
+<footer class="statusbar">
+  <div class="statusbar-left">
+    <div class="status-indicator idle" id="sb-indicator"></div>
+    <span id="sb-text">Ready</span>
+  </div>
+  <div class="statusbar-right" id="method-badges"></div>
+</footer>
+
+<!-- ══ TOAST NOTIFICATIONS ════════════════════════════════════════════ -->
+<div class="toast-container" id="toast-container"></div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
