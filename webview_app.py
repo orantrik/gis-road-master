@@ -897,7 +897,7 @@ def _find_free_port() -> int:
 
 
 def main():
-    port = _find_free_port()
+    port = int(os.environ.get("GIS_PORT", 0)) or _find_free_port()
     url  = f"http://127.0.0.1:{port}"
 
     # Start Flask in a daemon thread
